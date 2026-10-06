@@ -12,6 +12,7 @@ P,vol1,vol2,vol3,volN,freq2,freq3,cut,res,amt,fAtk,fDec,fSus,lAtk,lDec,lSus,
 m1 : 0=waveform, 1=range, 2=patch (LED VCO1 clignote)
 revType : 0 ROOM, 1 HALL, 2 PLATE, 3 SPRING (choisi par ENC2 mode reverb)
 lockMask : hex "lo.hi" — bits à 1 = contrôle figé sur la valeur du patch
+          (37 bits : 0-12 switchs, 13-29 pots, 30-35 wave/range, 36 EXT VOL)
  (rétention latch, affiché en ambre)
 
 Lignes 'M' (moniteur MIDI, émises par le firmware en mode MIDI, une par
@@ -66,6 +67,13 @@ LOCK_POT_KEYS = ["vol1", "vol2", "vol3", "volN", "freq2", "freq3",
 LOCK_WAVE_RANGE = {"wave0": 30, "range0": 31,
                    "wave1": 32, "range1": 33,
                    "wave2": 34, "range2": 35}
+# Le volume de l'entrée externe (pot J49) n'appartient pas à l'ordre de la trame
+# (il est émis après revType), donc il ne peut pas entrer dans LOCK_POT_KEYS sans
+# décaler tous les bits. Le firmware lui réserve son propre bit.
+LOCK_EXT_BIT = 36
+# Idem pour le niveau de reverb (pot dédié J50) : il est émis dans le champ
+# `reverb` de la trame, hors LOCK_POT_KEYS, donc il a son propre bit.
+LOCK_REVERB_BIT = 37
 
 PATCHES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "patches.json")
@@ -599,7 +607,8 @@ class App:
     def _patch_to_line(self, p):
         """Convertit un dict patch (JSON) en ligne CSV pour la commande B du
         firmware. Ordre : nom,w1,r1,w2,r2,w3,r3,v1,v2,v3,vN,fr2,fr3,cut,res,
-        amt,fAtk,fDec,fSus,lAtk,lDec,lSus,glide,modMix,reverb,revType,s0..s12"""
+        amt,fAtk,fDec,fSus,lAtk,lDec,lSus,glide,modMix,reverb,revType,s0..s12,
+        extVol"""
         nom = p.get("nom", "PATCH").upper().replace(",", "_")
         w, r = p["w"], p["r"]
         v = p["v"]
@@ -612,10 +621,14 @@ class App:
             p.get("lAtk", 0), p.get("lDec", 0), p.get("lSus", 1),
             p.get("glide", 0), p.get("modMix", 0), p.get("reverb", 0.0)]]
         s = [str(int(bool(x))) for x in sw]
+        # extVol en DERNIER champ (optionnel côté firmware) : la position du
+        # pot J49, 0..1. C'est ce que le knob "EXT VOL" lit dans la trame P.
+        ext = max(0.0, min(1.0, float(p.get("extVol", 0.0))))
         return "B " + nom + "," + \
             ",".join(str(x) for x in [w[0], r[0], w[1], r[1], w[2], r[2]]) + \
             "," + ",".join(f) + "," + \
-            str(int(p.get("revtype", 0))) + "," + ",".join(s)
+            str(int(p.get("revtype", 0))) + "," + ",".join(s) + \
+            ",{:.3f}".format(ext)
 
     def _push_bank(self):
         """Envoie B! (vide banque) puis chaque patch au firmware."""
@@ -677,6 +690,9 @@ class App:
             "reverb": d.get("reverb", 0.0),
             "revtype": d.get("revtype", 0),
             "sw": sw,
+            # Position 0..1 du pot J49, telle qu'émise dans la trame P :
+            # sans ce champ, « sauver l'état courant » perdrait le feedback.
+            "extVol": max(0.0, min(1.0, d.get("ext", 0.0))),
         }
 
     def _save_current(self):
@@ -902,29 +918,34 @@ class App:
                       "courte ; ici on en voit les 2 dernières en haut. "
                       "Désactivable à volonté (actions GUI uniquement).")
 
-# --- Mod/Glide/Out (x 30..340)
-        self.knob("glide", 120, 210, "GLIDE", fmt="{:.0%}",
-                  help="GLIDE (portamento) : temps de glissement de fréquence "
-                       "entre deux notes. Nécessite le switch GLIDE ON.")
-        self.knob("modmix", 265, 210, "MOD MIX", fmt="{:.0%}",
-                  help="MOD MIX : quantité de modulation provenant du VCO3/LFO "
-                       "(envoyée vers la hauteur, le filtre et le volume).")
-        self.switch("glideOn", 85, 310, "GLIDE ON",
+        # --- Mod/Glide/Out (x 30..340) — 2 colonnes, lu de bas en haut puis
+        # colonne suivante, pour suivre les câblages réels sur l'ESP32 :
+        #   col1 (x=95)  : MOD MIX 210, GLIDE 330, GLIDE ON 450, DECAY 570
+        #   col2 (x=235) : MOD OSC 210, CTRL OSC3 330, REVERB 450, écran 540+
+        # Le bloc reverb (pot J50 + afficheur) reste en bas à droite.
+        self.switch("decay", 95, 570, "DECAY",
+                    help="DECAY : réglage des temps de déclin des enveloppes.")
+        self.switch("glideOn", 95, 450, "GLIDE ON",
                     help="GLIDE ON : active le glissement tonal (portamento) "
                          "entre les notes jouées en séquence.")
-        self.switch("modOsc", 150, 310, "MOD OSC",
-                    help="MOD OSC : achemine la sortie du VCO3 vers la chaîne "
-                         "de modulation (vibrato / filtre / gain).")
-        self.switch("decay", 240, 310, "DECAY",
-                    help="DECAY : réglage des temps de déclin des enveloppes.")
-        self.switch("ctrlOsc3", 305, 310, "CTRL OSC3",
+        self.knob("glide", 95, 330, "GLIDE", fmt="{:.0%}",
+                  help="GLIDE (portamento) : temps de glissement de fréquence "
+                       "entre deux notes. Nécessite le switch GLIDE ON.")
+        self.knob("modmix", 95, 210, "MOD MIX", fmt="{:.0%}",
+                  help="MOD MIX : quantité de modulation provenant du VCO3/LFO "
+                       "(envoyée vers la hauteur, le filtre et le volume).")
+        self.switch("ctrlOsc3", 235, 330, "CTRL OSC3",
                     help="CTRL OSC3 : passe le VCO3 en mode contrôle (LFO) au "
                          "lieu d'une oscillation audible.")
-        self.switch("typeNoise", 90, 430, "NOISE TYPE", states=("PINK", "WHITE"),
-                    help="NOISE TYPE : couleur du bruit — rose (PINK) ou blanc "
-                         "(WHITE).")
-        self.switch("outOn", 90, 550, "OUTPUT",
-                    help="OUTPUT : coupure générale du son du synthé.")
+        self.switch("modOsc", 235, 210, "MOD OSC",
+                    help="MOD OSC : achemine la sortie du VCO3 vers la chaîne "
+                         "de modulation (vibrato / filtre / gain).")
+        # Pot REVERB dédié (J50, Mux2/C14) : reste dans ce panneau.
+        self.knob("reverb", 235, 450, "REVERB", fmt="{:.0%}",
+                  help="REVERB : niveau de la réverbération (pot dédié J50). "
+                       "0 % = reverb coupée. Le type d'algo (ROOM / HALL / "
+                       "PLATE / SPRING) se choisit avec le bouton PUSH du "
+                       "VCO2, en mode REVERB.")
         # Indicateur reverb façon écran 80s : valeur en % (ambre), LED de
         # service, label en dessous.
         self.top["revPanel"] = cv.create_rectangle(
@@ -954,9 +975,7 @@ class App:
         self.knob("vol1", 905, 210, "OSC1 VOL",
                   help="OSC1 VOL : volume de l'oscillateur 1 dans le mixer.")
         self.knob("vol2", 905, 330, "OSC2 VOL",
-                  help="OSC2 VOL : volume de l'oscillateur 2 dans le mixer. "
-                       "En mode REVERB (poussoir VCO2), devient le niveau de "
-                       "réverbération.")
+                  help="OSC2 VOL : volume de l'oscillateur 2 dans le mixer.")
         self.knob("vol3", 905, 450, "OSC3 VOL",
                   help="OSC3 VOL : volume de l'oscillateur 3 dans le mixer.")
         self.knob("volN", 905, 570, "NOISE VOL",
@@ -969,7 +988,14 @@ class App:
                     help="Envoie l'oscillateur 3 au mixer.")
         self.switch("mixOnN", 970, 570, "NOISE",
                     help="Envoie le bruit au mixer.")
+        self.switch("typeNoise", 1050, 450, "NOISE TYPE",
+                    states=("PINK", "WHITE"),
+                    help="NOISE TYPE : couleur du bruit — rose (PINK) ou blanc "
+                         "(WHITE).")
         self.knob("extVol", 1040, 570, "EXT VOL",
+                  # Plage 0..1 : la trame P émet potExt (position du pot),
+                  # pas volumeExt. Le firmware applique ensuite EXT_FB_SCALE
+                  # pour obtenir le gain réel de la boucle.
                   help="EXT VOL : volume de l'entrée externe — feedback "
                        "interne du signal (la sortie est réinjectée avant le "
                        "filtre, hack Model D). 0 % = entrée coupée ; > 0 % = "
@@ -981,7 +1007,7 @@ class App:
         self.switch("kbd1", 1062, 265, "KBD CTL1",
                     help="KBD CTL1 : le clavier pilote la fréquence de coupure "
                          "du filtre (1 V/octave, façon Model D).")
-        self.switch("kbd2", 1062, 320, "KBD CTL2",
+        self.switch("kbd2", 1062, 330, "KBD CTL2",
                     help="KBD CTL2 : contrôle partiel du clavier sur la "
                          "coupure du filtre.")
 
@@ -1019,8 +1045,7 @@ class App:
                          "LED clignote)."
                          if i != 1 else
                          "choisit le type de réverbération (ROOM/HALL/PLATE/"
-                         "SPRING) ; le pot OSC2 VOL devient alors le niveau "
-                         "de reverb.")
+                         "SPRING) ; le niveau reste sur le pot REVERB (J50).")
             self.knob(f"wave{i}", 475, y, "WAVEFORM", lo=0, hi=5,
                       fmt=lambda v: WAVES[int(v)], wave=1,
                       help=f"WAVEFORM du VCO {i+1} : Tri / Tri-Saw / Scie / "
@@ -1087,9 +1112,10 @@ class App:
                            "ou glisser sur les touches joue la note (commande N), "
                            "relâcher l'arrête (X). Fonctionne en mode SÉRIE "
                            "seulement ; en MIDI (RX coupée) il reste visuel."))
-        self._tips.append((190, 535, 280, 614, "Réverbération : niveau par le "
-                           "pot OSC2 VOL (en mode REVERB) et algorithme par le "
-                           "poussoir VCO2 — ROOM / HALL / PLATE / SPRING."))
+        self._tips.append((190, 535, 280, 614, "Réverbération : niveau par le pot "
+                           "REVERB dédié (J50, juste au-dessus) et algorithme "
+                           "par le poussoir VCO2 — ROOM / HALL / PLATE / "
+                           "SPRING."))
 
     # ------------------------------------------------------------- données
     def _update_all(self, d, sw, locks=0):
@@ -1100,12 +1126,16 @@ class App:
                    "fSus": "fSus", "lAtk": "lAtk", "lDec": "lDec",
                    "lSus": "lSus", "glide": "glide", "modmix": "modmix",
                    "det1": "freq2", "det2": "freq3",
-                   "extVol": "ext"}.get(name)
+                   "extVol": "ext", "reverb": "reverb"}.get(name)
             locked = False
             if idx in LOCK_POT_KEYS:
                 locked = bool(locks & (1 << (13 + LOCK_POT_KEYS.index(idx))))
             elif name in LOCK_WAVE_RANGE:
                 locked = bool(locks & (1 << LOCK_WAVE_RANGE[name]))
+            elif name == "extVol":
+                locked = bool(locks & (1 << LOCK_EXT_BIT))
+            elif name == "reverb":
+                locked = bool(locks & (1 << LOCK_REVERB_BIT))
             if idx and idx in d:
                 k.update(d[idx], locked)
             elif name.startswith("wave"):
@@ -1116,28 +1146,28 @@ class App:
             if key in self.switches:
                 self.switches[key].update(sw[idx],
                                           locked=bool(locks & (1 << idx)))
-        # EXT VOL : grisé tant que l'entrée externe est coupée (vol == 0)
+        # EXT VOL : gris tant que l'entrée externe est coupée (vol == 0),
+        # orange sinon (comme un potard actif). SAUF si le pot est figé par un
+        # patch : le cyan de verrouillage doit primer, ce bloc venait l'écraser
+        # après Knob.update() et le pot restait orange alors qu'il était gelé.
         if "extVol" in self.knobs:
             ek = self.knobs["extVol"]
-            eon = d.get("ext", 0.0) > 0.02
-            self.cv.itemconfigure(ek.idv["needle"],
-                                  fill="#ff8c3a" if eon else "#4a525b")
-            self.cv.itemconfigure(ek.idv["value"],
-                                  fill="#ffd24a" if eon else "#5a6470")
+            if locks & (1 << LOCK_EXT_BIT):
+                needle_fill, value_fill = "#00e5ff", "#00e5ff"
+            elif d.get("ext", 0.0) > 0.02:
+                needle_fill, value_fill = "#ff8c3a", "#ffd24a"
+            else:
+                needle_fill, value_fill = "#4a525b", "#5a6470"
+            self.cv.itemconfigure(ek.idv["needle"], fill=needle_fill)
+            self.cv.itemconfigure(ek.idv["value"], fill=value_fill)
         for i in range(3):
             if f"vco{i}sw" in self.switches:
                 self.switches[f"vco{i}sw"].update(d.get(f"modR{i}", 0))
-        # ENC2 en mode 2 = REVERB : le pot OSC2 VOL pilote le niveau de reverb
+        # ENC2 en mode 2 = REVERB : le push VCO2 ne change plus que le TYPE
+        # d'algo. Le niveau est porté par son propre pot J50 (knob REVERB),
+        # donc le knob OSC2 VOL affiche toujours le volume d'OSC2.
         if "vol2" in self.knobs:
-            k = self.knobs["vol2"]
-            in_rev = d.get("modR1", 0) == 2
-            if in_rev:
-                k.fmt = "{:.0%}"
-                k.update(d.get("reverb", 0.0), False)  # valeur reverb, non latchée
-            else:
-                k.fmt = "{:.2f}"
-            self.cv.itemconfigure(k.idv["label"],
-                                  text="REVERB" if in_rev else "OSC2 VOL")
+            self.knobs["vol2"].fmt = "{:.2f}"
         # Indicateur reverb façon écran 80s : valeur en % (ambre) + LED de service
         if "rev" in self.top:
             on = d.get("reverb", 0.0) > 0.001
@@ -1226,9 +1256,9 @@ class App:
             return
 
         locks = 0
-        if len(parts) > 45:
+        if len(parts) > 46:
             try:
-                lm = parts[45]
+                lm = parts[46]
                 if '.' in lm:
                     lo, hi = lm.split(".", 1)
                 else:
@@ -1238,21 +1268,21 @@ class App:
             except Exception:
                 locks = 0
         revtype = 0
-        if len(parts) > 46:
+        if len(parts) > 47:
             try:
-                revtype = int(parts[46])
+                revtype = int(parts[47])
             except (ValueError, IndexError):
                 revtype = 0
         ext = 0.0
-        if len(parts) > 47:
+        if len(parts) > 48:
             try:
-                ext = float(parts[47])
+                ext = float(parts[48])
             except (ValueError, IndexError):
                 ext = 0.0
         moddepth = 1.0
-        if len(parts) > 48:
+        if len(parts) > 49:
             try:
-                moddepth = float(parts[48])
+                moddepth = float(parts[49])
             except (ValueError, IndexError):
                 moddepth = 1.0
 
