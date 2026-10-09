@@ -10,9 +10,13 @@ Format de trame (une ligne, 48 champs + masque) :
 P,vol1,vol2,vol3,volN,freq2,freq3,cut,res,amt,fAtk,fDec,fSus,lAtk,lDec,lSus,
  glide,modmix, s0..s12, w1,r1,m1,w2,r2,m2,w3,r3,m3, note,midiOn,pitchBend,modWheel, patchNom, lockMask, revType
 m1 : 0=waveform, 1=range, 2=patch (LED VCO1 clignote)
+m2 : 0=waveform, 1=range, 2=reverb, 3=delay (LED VCO2 clignote en 2 et 3)
 revType : 0 ROOM, 1 HALL, 2 PLATE, 3 SPRING (choisi par ENC2 mode reverb)
+champs suivants : extVol (pot J49), modDepth (CC3), velDepth (CC9),
+          delayLevel (pot J50 en mode ENC2 3), delayType (0..3 = 60/120/240/480 ms)
 lockMask : hex "lo.hi" — bits à 1 = contrôle figé sur la valeur du patch
-          (37 bits : 0-12 switchs, 13-29 pots, 30-35 wave/range, 36 EXT VOL)
+          (39 bits : 0-12 switchs, 13-29 pots, 30-35 wave/range, 36 EXT VOL,
+           37 NIVEAU REVERB, 38 NIVEAU DELAY)
  (rétention latch, affiché en ambre)
 
 Lignes 'M' (moniteur MIDI, émises par le firmware en mode MIDI, une par
@@ -41,6 +45,7 @@ import argparse
 import json
 import math
 import os
+import random
 import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog
@@ -52,6 +57,31 @@ except ImportError:
 
 WAVES = ["Tri", "Tri-Saw", "Scie", "Carre", "Imp30", "Imp15"]
 RANGES = ["32'", "16'", "8'", "4'", "2'", "Lo"]
+
+# --- textures du fond, façon Model D original -----------------------------
+# Cabinet en noyer (marges) + plaque d'aluminium anodisé noir brossé au
+# centre, sérigraphie crème des cadres de section par-dessus. Tout est peint
+# en canvas, sans image ni dépendance, avec une graine fixe : rendu stable.
+WOOD_BASE = "#5b3a22"
+WOOD_DARK = ("#4a2e1a", "#3f2716", "#472a17", "#553521")
+WOOD_LIGHT = ("#6b4529", "#7a5232", "#65402a", "#714928")
+PANEL_FILL = "#17181a"
+PANEL_EDGE = "#0b0c0d"
+PANEL_BRUSH_LIGHT = ("#1c1e22", "#21242a", "#1a1d21")
+PANEL_BRUSH_DARK = ("#111214", "#131417", "#101113")
+PANEL_GRAIN = ("#20232a", "#0f1012", "#1a1d23")
+SILK = "#c2baa8"          # sérigraphie crème (cadres de section)
+# Rectangle de la plaque : 6 px de métal autour des sections, le bas s'arrête
+# au-dessus des jauges MOD DEPTH / VEL FILT qui vivent sur le rail en bois.
+PANEL_BOX = (24, 24, 1476, 849)
+# Vis du panneau, uniquement dans les marges en bois (aucun widget à ces
+# emplacements : x<24, x>1476, y<24, ou y>849 hors jauges).
+PANEL_SCREWS = (
+    (13, 200), (13, 470), (13, 740),
+    (1487, 200), (1487, 470), (1487, 740),
+    (330, 13), (750, 13), (1170, 13),
+    (700, 875), (1100, 875), (1400, 875),
+)
 
 # Échelle appliquée côté firmware à la molette de modulation (CC1 ÷2, cf.
 # MOD_WHEEL_SCALE dans minimoog.ino). La GUI compense pour afficher la position
@@ -74,6 +104,19 @@ LOCK_EXT_BIT = 36
 # Idem pour le niveau de reverb (pot dédié J50) : il est émis dans le champ
 # `reverb` de la trame, hors LOCK_POT_KEYS, donc il a son propre bit.
 LOCK_REVERB_BIT = 37
+# Le delay réutilise le même pot J50 (autre cible, autre valeur mémoire) :
+# il occupe le champ `delaylevel` de la trame et un bit à lui seul.
+LOCK_DELAY_BIT = 38
+
+# --- LED OVERLOAD (GUI uniquement, aucun changement firmware) ---------------
+# Le Model D a une lampe OVERLOAD qui s'allume quand la sortie sature. La GUI
+# ne reçoit pas l'audio : on l'estime à partir de la somme des sources actives
+# du mixer (volumes OSC1/2/3 + bruit + feedback entrée externe), pondérée par
+# une enveloppe LOUDNESS simulée localement (lAtk/lDec/lSus + note tenue).
+# Les volumes de la trame sont en 0..1, donc « drive » va de 0 (silence) à ~4
+# (4 sources à fond). Seuil et durée de maintien visuelle ajustables ici :
+OVERLOAD_THRESHOLD = 2.8    # « drive » (somme × enveloppe) au-delà duquel ça sature
+OVERLOAD_HOLD = 0.35        # s : la LED reste allumée après un pic (persistance)
 
 PATCHES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "patches.json")
@@ -133,7 +176,7 @@ class Knob:
     """Cadran rotatif (potentiomètre) dessiné sur le canvas."""
 
     def __init__(self, cv, x, y, label, cw=270, lo=0.0, hi=1.0, fmt="{:.2f}",
-                 wave=None, norm=None):
+                 wave=None, norm=None, accent=None):
         self.cv = cv
         self.cx, self.cy = x, y
         self.r = 26
@@ -145,6 +188,10 @@ class Knob:
         # Permet d'afficher la ROTATION réelle du pot (inverse du taper) tout en
         # gardant la valeur physique en texte (ex: attack exponentiel 0..10s).
         self.norm = norm
+        # accent : teinte propre à ce potard (FREQ OSC2 / FREQ OSC3) —
+        # étiquette, graduations, index et couronne de la face supérieure
+        # prennent cette couleur, ce qui rend les deux pots distincts.
+        self.accent = accent
         self.idv = {}
         self._draw()
 
@@ -164,8 +211,8 @@ class Knob:
         x, y, r = self.cx, self.cy, self.r
         self.idv["label"] = cv.create_text(
             x, y - r - 20, text=self.label, font=("Helvetica", 9, "bold"),
-            fill="#d8d8d8")
-        # Graduations (petites barres) autour du cadran, comme le Moog
+            fill=self.accent or "#d8d8d8")
+        # Échelle sérigraphiée autour du cadran (blanc cassé, comme le Model D)
         n = max(5, int(self.cw / 22.5) + 1)
         for i in range(n):
             t = i / (n - 1)
@@ -174,18 +221,33 @@ class Knob:
             y1 = y - math.sin(a) * (r + 6)
             x2 = x + math.cos(a) * (r + 10)
             y2 = y - math.sin(a) * (r + 10)
-            cv.create_line(x1, y1, x2, y2, fill="#3a4048", width=1)
+            cv.create_line(x1, y1, x2, y2,
+                           fill=self.accent or "#a8a191", width=1)
+        # Ombre portée sur la plaque métallique
+        cv.create_oval(x - r + 3, y - r + 4, x + r + 3, y + r + 4,
+                       fill="#0a0b0c", outline="")
+        # Corps : bakélite noir mat, pourtour cannelé (30 rayons) puis face
+        # supérieure légèrement plus claire — le potard du Model D.
         self.idv["body"] = cv.create_oval(x - r, y - r, x + r, y + r,
-                                          fill="#1e2329", outline="#4a525b",
-                                          width=2)
-        self.idv["knob"] = cv.create_oval(x - r * 0.3, y - r * 0.3,
-                                          x + r * 0.3, y + r * 0.3,
-                                          fill="#3a4048", outline="#6b747e")
+                                          fill="#171a1e", outline="#07080a",
+                                          width=1)
+        for i in range(30):
+            a = math.radians(i * 12.0)
+            ca, sa = math.cos(a), math.sin(a)
+            cv.create_line(x + ca * (r - 6), y - sa * (r - 6),
+                           x + ca * (r - 1), y - sa * (r - 1),
+                           fill="#41474f", width=2)
+        self.idv["cap"] = cv.create_oval(x - r * 0.76, y - r * 0.76,
+                                         x + r * 0.76, y + r * 0.76,
+                                         fill="#2b3037",
+                                         outline=self.accent or "#0c0e11",
+                                         width=2 if self.accent else 1)
         if self.wave is None:
+            a0 = self._angle(0.0)
             self.idv["needle"] = cv.create_line(
-                x, y, x + r * 0.75 * math.cos(self._angle(0.0)),
-                y - r * 0.75 * math.sin(self._angle(0.0)),
-                fill="#ff8c3a", width=3)
+                x + r * 0.10 * math.cos(a0), y - r * 0.10 * math.sin(a0),
+                x + r * 0.70 * math.cos(a0), y - r * 0.70 * math.sin(a0),
+                fill=self.accent or "#efe9dc", width=3, capstyle="round")
         else:
             self.idv["needle"] = None
             self.idv["icon"] = None
@@ -230,10 +292,19 @@ class Knob:
         a = self._angle_t(t)
         x, y, r = self.cx, self.cy, self.r
         # Couleur "figé patch" (cyan, tranche sur l'orange/vert) vs normale
-        c = "#00e5ff" if locked else "#ff8c3a"
+        c = "#00e5ff" if locked else (self.accent or "#efe9dc")
         vc = "#00e5ff" if locked else "#ffd24a"
-        self.cv.itemconfigure(self.idv["body"], width=2 if locked else 2,
-                              outline="#00e5ff" if locked else "#4a525b")
+        self.cv.itemconfigure(self.idv["body"], width=2 if locked else 1,
+                              outline="#00e5ff" if locked else "#07080a")
+        # Étiquette et couronne de la face : elles portent l'accent du potard
+        # (FREQ OSC2 bleu / OSC3 orange) ; figées par un patch elles passent au
+        # cyan comme le reste de l'indication de verrouillage.
+        self.cv.itemconfigure(
+            self.idv["label"],
+            fill="#00e5ff" if locked else (self.accent or "#d8d8d8"))
+        self.cv.itemconfigure(
+            self.idv["cap"],
+            outline="#00e5ff" if locked else (self.accent or "#0c0e11"))
         if self.wave is not None:
             kind = int(val)
             if self.idv.get("icon") is not None:
@@ -242,26 +313,45 @@ class Knob:
             self.cv.itemconfigure(self.idv["icon"], fill=c)
             text = self.fmt(kind)
         else:
-            lx = x + r * 0.75 * math.cos(a)
-            ly = y - r * 0.75 * math.sin(a)
-            self.cv.coords(self.idv["needle"], x, y, lx, ly)
+            bx = x + r * 0.10 * math.cos(a)
+            by = y - r * 0.10 * math.sin(a)
+            lx = x + r * 0.70 * math.cos(a)
+            ly = y - r * 0.70 * math.sin(a)
+            self.cv.coords(self.idv["needle"], bx, by, lx, ly)
             self.cv.itemconfigure(self.idv["needle"], fill=c)
             text = self.fmt(val) if callable(self.fmt) else self.fmt.format(val)
         self.cv.itemconfigure(self.idv["value"], text=text, fill=vc)
 
 
-class SwitchOn:
-    """Switch deux positions — LED + texte."""
+def _mix(c1, c2, t):
+    """Mélange deux couleurs « #rrggbb » — t = poids de la 2e."""
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(int(round(a[i] + (b[i] - a[i]) * t))
+                                   for i in range(3))
 
-    def __init__(self, cv, x, y, label, on_color="#3bff5a", radius=10, states=None,
-                 blink_txt="PATCH"):
+
+# Code couleur officiel des « Switch, Rocker » du Model D (réf. 51-20X) :
+MD_BLUE = "#2f6fd0"     # sources audio : on / off dans le mixer
+MD_ORANGE = "#e8620f"   # modulation : d'une source vers sa destination
+MD_WHITE = "#e8e4dc"    # fonctions de jeu (GLIDE, DECAY, KBD CTL, PUSH)
+MD_BLACK = "#2a2d31"    # sélection d'une source (NOISE TYPE)
+
+
+class SwitchOn:
+    """Bascule deux positions — un seul rond, allumé ou éteint."""
+
+    def __init__(self, cv, x, y, label, on_color="#3bff5a", radius=10,
+                 states=None, blink_txt="PATCH", color=None, orient="h"):
         self.cv = cv
         self.cx, self.cy = x, y
         self.label = label
         self.on_color = on_color
         self.r = radius
-        self.states = states  # (texte OFF, texte ON) pour les sélecteurs 2 positions
-        self.blink_txt = blink_txt  # texte affiché quand raw==2 (led clignote)
+        self.states = states
+        self.blink_txt = blink_txt
+        self.color = color
+        self.orient = orient
         self.idv = {}
         self.blink = False
         self._draw()
@@ -269,19 +359,18 @@ class SwitchOn:
     def _draw(self):
         cv, x, y = self.cv, self.cx, self.cy
         self.idv["label"] = cv.create_text(
-            x, y, text=self.label, font=("Helvetica", 8, "bold"),
+            x, y - 2, text=self.label, font=("Helvetica", 8, "bold"),
             fill="#d8d8d8")
-        r = self.r
-        self.idv["led"] = cv.create_oval(x - r, y + 16 - r, x + r, y + 16 + r,
-                                         fill="#3a4048", outline="#4a525b")
-        self.idv["txt"] = cv.create_text(x, y + 16 + r + 12,
-                                         text="OFF", font=("Helvetica", 8),
+        cv.create_oval(x - 9, y + 9, x + 9, y + 27, fill="#0a0b0d", outline="")
+        self.idv["btn"] = cv.create_oval(x - 7, y + 11, x + 7, y + 25,
+                                        fill="#1b1f25", outline="#3a4048",
+                                        width=1)
+        self.idv["txt"] = cv.create_text(x, y + 38, text="OFF",
+                                         font=("Helvetica", 8),
                                          fill="#9aa3ad")
 
     def update(self, raw, locked=False):
-        # raw : 0/1/2 — la valeur 2 (mode patch ENC1) fait clignoter la LED
-        # locked (bout latch) : le switch est figé sur la position du patch
-        self.blink = (raw == 2)
+        self.blink = (raw >= 2)
         on = bool(raw)
         self._set(on)
         if self.states:
@@ -290,53 +379,106 @@ class SwitchOn:
             txt = self.blink_txt if self.blink else ("ON" if on else "OFF")
         self.cv.itemconfigure(self.idv["txt"], text=txt,
                               fill="#00e5ff" if locked else "#9aa3ad")
-        self.cv.itemconfigure(self.idv["led"],
-                              outline="#00e5ff" if locked else "#4a525b")
 
     def _set(self, on):
-        self.cv.itemconfigure(self.idv["led"],
-                              fill=self.on_color if on else "#3a4048")
+        self.cv.itemconfigure(self.idv["btn"],
+                              fill=self.on_color if on else "#1b1f25")
+
+    def _lamp(self, on):
+        pass
 
     def blink_tick(self, phase_on):
-        """Clignotement local (le firmware ne l'envoie pas assez vite)."""
-        if self.blink:
-            self._set(phase_on)
+        pass
 
 
 class Wheel:
-    """Molette verticale (pitch / mod) — aiguille + valeur en dessous."""
+    """Molette verticale (pitch / mod).
+
+    Sur le Model D les molettes passent dans une fente de la plaque : on
+    redessine donc un logement encastré (champ + ouverture noire), des rails
+    de graduation de part et d'autre, et un capuchon mobile à index coloré —
+    au lieu du simple pavé sur le panneau qu'on avait avant.
+    """
+
+    OUTER = 26   # demi-largeur de la plaque de logement
+    INNER = 18   # demi-largeur de la fente (8 px de rail de chaque côté)
+    TH = 22      # hauteur du capuchon mobile
 
     def __init__(self, cv, x, y, w, h, label, lo=0.0, hi=1.0,
-                 color="#ffd24a", fmt="{:.0%}", pad=8):
+                 color="#ffd24a", fmt="{:.0%}", pad=8, detent=False):
         self.cv = cv
         self.x, self.y = x, y
         self.w, self.h = w, h
         self.lo, self.hi = lo, hi
         self.fmt = fmt
+        self.color = color
         self.pad = pad
-        self.thw = w - 8
-        self.thh = 4
+        self.thh = self.TH
+        self._parts = []          # éléments mobiles (coords absolues + décalage)
+
+        # 1) ombre portée puis plaque de logement encastrée
+        cv.create_rectangle(x - self.OUTER + 3, y + 4,
+                            x + self.OUTER + 3, y + h + 4,
+                            fill="#0a0b0c", outline="")
+        cv.create_rectangle(x - self.OUTER, y, x + self.OUTER, y + h,
+                            fill="#22262c", outline="#07080a", width=1)
+        # 2) fente noire + rails de graduation sur les deux joues
+        cv.create_rectangle(x - self.INNER, y + 3, x + self.INNER, y + h - 3,
+                            fill="#050607", outline="#14171b", width=1)
+        n = 5
+        for i in range(n):
+            ty = y + 3 + i * (h - 6) / (n - 1)
+            mid = (i == (n - 1) // 2)
+            # repère central = point de repos (molette de pitch rappelée au
+            # centre par un ressort sur l'instrument d'origine)
+            col = "#efe9dc" if (mid and detent) else "#7f868f"
+            lw = 2 if (mid and detent) else 1
+            cv.create_line(x - self.OUTER + 1, ty, x - self.INNER, ty,
+                           fill=col, width=lw)
+            cv.create_line(x + self.INNER, ty, x + self.OUTER - 1, ty,
+                           fill=col, width=lw)
+        # 3) étiquette teintée à la couleur de la molette
         cv.create_text(x, y - 12, text=label, font=("Helvetica", 9, "bold"),
-                       fill="#d8d8d8")
-        cv.create_rectangle(x - w / 2, y, x + w / 2, y + h, fill="#1b1f25",
-                            outline="#2f353c")
-        cv.create_line(x, y + pad, x, y + h - pad, fill="#2f353c")
-        self.thumb = cv.create_rectangle(x - self.thw / 2, y,
-                                         x + self.thw / 2, y + self.thh,
-                                         fill=color, outline="#4a525b")
+                       fill=color)
+        # 4) capuchon mobile : corps, face, nervures puis index coloré
+        self._top0 = y + pad + (h - self.TH - 2 * pad)   # position pour lo
+        self.thumb = self._rect(x - self.INNER + 1, self._top0,
+                                x + self.INNER - 1, self._top0 + self.TH,
+                                "#171a1e", "#07080a", 1)
+        self._rect(x - self.INNER + 3, self._top0 + 2,
+                   x + self.INNER - 3, self._top0 + self.TH - 2,
+                   "#272c33", "", 0)
+        for dy in (6, self.TH - 6):
+            self._line(x - self.INNER + 5, self._top0 + dy,
+                       x + self.INNER - 5, self._top0 + dy, "#41474f", 1)
+        self._line(x - self.INNER + 3, self._top0 + self.TH / 2,
+                   x + self.INNER - 3, self._top0 + self.TH / 2, color, 2)
+        # 5) valeur sous la fente
         self.val = cv.create_text(x, y + h + 16, text="",
                                   font=("Helvetica", 9, "bold"),
                                   fill="#d8d8d8")
         self.update(lo)
 
+    def _rect(self, x1, y1, x2, y2, fill, outline, width):
+        it = self.cv.create_rectangle(x1, y1, x2, y2, fill=fill,
+                                      outline=outline, width=width)
+        self._parts.append((it, x1, y1 - self._top0, x2, y2 - self._top0))
+        return it
+
+    def _line(self, x1, y1, x2, y2, fill, width):
+        it = self.cv.create_line(x1, y1, x2, y2, fill=fill, width=width)
+        self._parts.append((it, x1, y1 - self._top0, x2, y2 - self._top0))
+        return it
+
     def update(self, v):
         lo, hi = self.lo, self.hi
         v = max(lo, min(hi, v))
-        t = (v - lo) / (hi - lo)
+        t = (v - lo) / (hi - lo) if hi != lo else 0.0
+        t = max(0.0, min(1.0, t))
         span = self.h - self.thh - 2 * self.pad
         top = self.y + self.pad + (1 - t) * span
-        self.cv.coords(self.thumb, self.x - self.thw / 2, top,
-                       self.x + self.thw / 2, top + self.thh)
+        for it, x1, dy1, x2, dy2 in self._parts:
+            self.cv.coords(it, x1, top + dy1, x2, top + dy2)
         text = self.fmt(v) if callable(self.fmt) else self.fmt.format(v)
         self.cv.itemconfigure(self.val, text=text)
 
@@ -485,11 +627,13 @@ class App:
 
         self.root = tk.Tk()
         self.root.title("Minimoog Model D — Panneau temps réel")
-        self.root.configure(bg="#14171c")
+        # Fond = bois du cabinet : si la fenêtre est agrandie, le débord
+        # prolonge le cabinet au lieu de laisser un gris technique.
+        self.root.configure(bg=WOOD_BASE)
         self.root.geometry(f"{self.W}x{self.H}")
         self.root.minsize(self.W, self.H)
         self.cv = tk.Canvas(self.root, width=self.W, height=self.H,
-                            bg="#14171c", highlightthickness=0)
+                            bg=WOOD_BASE, highlightthickness=0)
         self.cv.pack(fill="both")
 
         self.knobs = {}
@@ -503,6 +647,9 @@ class App:
         self.tt = ToolTip()
         self._mon_on = True          # moniteur MIDI actif au lancement
         self._mon_q = []             # max 2 lignes, q[0] = plus récente
+        self._ovl_env = 0.0          # enveloppe LOUDNESS simulée (LED OVERLOAD)
+        self._ovl_t = time.time()
+        self._ovl_lit_until = 0.0    # maintien visuel de la LED OVERLOAD
         self._build_panel()
         self._build_patch_widgets()
         self.cv.bind("<Enter>", self._tip_motion)
@@ -540,24 +687,30 @@ class App:
 
     # ------------------------------------------------------------- structure
     def _box(self, x, y, w, h, title=None):
-        self.cv.create_rectangle(x, y, x + w, y + h, fill="#1b1f25",
-                                 outline="#2f353c", width=1)
+        # Sérigraphie crème façon Model D : simple cadre imprimé SUR la
+        # plaque, sans remplissage — la texture du métal brossé (peinte par
+        # _paint_background) reste visible dessous, comme sur le vrai panneau.
+        cv = self.cv
+        cv.create_rectangle(x - 1, y - 1, x + w + 1, y + h + 1,
+                            outline=PANEL_EDGE, width=1)
+        cv.create_rectangle(x, y, x + w, y + h, outline=SILK, width=1)
         if title:
-            self.cv.create_text(x + 14, y + 16, text=title,
-                                font=("Helvetica", 10, "bold"),
-                                fill="#ffd24a", anchor="w")
+            cv.create_text(x + 14, y + 16, text=title,
+                           font=("Helvetica", 10, "bold"),
+                           fill="#ffd24a", anchor="w")
 
     def knob(self, key, x, y, label, lo=0.0, hi=1.0, fmt="{:.2f}", wave=None,
-             norm=None, help=None):
+             norm=None, help=None, accent=None):
         self.knobs[key] = Knob(self.cv, x, y, label, lo=lo, hi=hi, fmt=fmt,
-                               wave=wave, norm=norm)
+                               wave=wave, norm=norm, accent=accent)
         if help:
             self._tips.append((x - 38, y - 50, x + 38, y + 46, help))
 
     def switch(self, key, x, y, label, states=None, blink_txt="PATCH",
-               help=None):
+               help=None, color=MD_WHITE, orient="h"):
         self.switches[key] = SwitchOn(self.cv, x, y, label, states=states,
-                                      blink_txt=blink_txt)
+                                      blink_txt=blink_txt, color=color,
+                                      orient=orient)
         if help:
             self._tips.append((x - 32, y - 14, x + 32, y + 54, help))
 
@@ -608,7 +761,7 @@ class App:
         """Convertit un dict patch (JSON) en ligne CSV pour la commande B du
         firmware. Ordre : nom,w1,r1,w2,r2,w3,r3,v1,v2,v3,vN,fr2,fr3,cut,res,
         amt,fAtk,fDec,fSus,lAtk,lDec,lSus,glide,modMix,reverb,revType,s0..s12,
-        extVol"""
+        extVol,dlyLevel,dlyType"""
         nom = p.get("nom", "PATCH").upper().replace(",", "_")
         w, r = p["w"], p["r"]
         v = p["v"]
@@ -624,11 +777,15 @@ class App:
         # extVol en DERNIER champ (optionnel côté firmware) : la position du
         # pot J49, 0..1. C'est ce que le knob "EXT VOL" lit dans la trame P.
         ext = max(0.0, min(1.0, float(p.get("extVol", 0.0))))
+        # dlyLevel / dlyType en FIN de ligne, après extVol (champs optionnels
+        # côté firmware) : niveau mémoire du delay et durée choisie par ENC2.
+        dly = max(0.0, min(1.0, float(p.get("dlyLevel", 0.0))))
         return "B " + nom + "," + \
             ",".join(str(x) for x in [w[0], r[0], w[1], r[1], w[2], r[2]]) + \
             "," + ",".join(f) + "," + \
             str(int(p.get("revtype", 0))) + "," + ",".join(s) + \
-            ",{:.3f}".format(ext)
+            ",{:.3f}".format(ext) + ",{:.3f}".format(dly) + \
+            "," + str(int(p.get("dlyType", 0)))
 
     def _push_bank(self):
         """Envoie B! (vide banque) puis chaque patch au firmware."""
@@ -693,6 +850,9 @@ class App:
             # Position 0..1 du pot J49, telle qu'émise dans la trame P :
             # sans ce champ, « sauver l'état courant » perdrait le feedback.
             "extVol": max(0.0, min(1.0, d.get("ext", 0.0))),
+            # Niveau et durée du delay, tels qu'émis dans la trame P.
+            "dlyLevel": max(0.0, min(1.0, d.get("delaylevel", 0.0))),
+            "dlyType": int(d.get("delaytype", 0) or 0),
         }
 
     def _save_current(self):
@@ -846,7 +1006,76 @@ class App:
                       "matériel de l'ESP puis re-push de la banque (repassage "
                       "en série).")
 
+    def _paint_background(self):
+        """Fond façon Model D : cabinet en noyer dans les marges, plaque
+        d'aluminium anodisé noir brossé au centre. Peinte une seule fois, au
+        tout début de _build_panel() — graine fixe, rendu identique à chaque
+        lancement. _box() ne pose ensuite que la sérigraphie crème."""
+        cv = self.cv
+        rnd = random.Random(1971)   # 1971 : sortie du Minimoog Model D
+        W, H = self.W, self.H
+
+        # 1) Cabinet en noyer : aplat + fibres horizontales ondulées
+        cv.create_rectangle(0, 0, W, H, fill=WOOD_BASE, width=0)
+        for _ in range(150):
+            base = rnd.uniform(-6, H + 6)
+            amp = rnd.uniform(1.0, 5.0)
+            col = rnd.choice(WOOD_DARK if rnd.random() < 0.55 else WOOD_LIGHT)
+            pts, x, y = [], -12.0, base
+            while x < W + 12:
+                pts.extend([x, y])
+                x += rnd.uniform(70, 180)
+                y = base + rnd.uniform(-amp, amp)
+            pts.extend([W + 12, y])
+            cv.create_line(*pts, smooth=True, fill=col,
+                           width=rnd.choice((1, 1, 1, 2)), capstyle="round")
+
+        # 2) Plaque d'aluminium anodisé : aplat sombre + tranche
+        px1, py1, px2, py2 = PANEL_BOX
+        cv.create_rectangle(px1, py1, px2, py2, fill=PANEL_FILL,
+                            outline=PANEL_EDGE, width=1)
+
+        # 3) Brossage horizontal fin : traits discontinus, teintes très proches
+        #    du fond — c'est le grain qui fait « métal » et non le contraste.
+        y = float(py1) + 2.0
+        while y < py2 - 1:
+            d = rnd.random()
+            if d < 0.34:
+                xa, xb = float(px1), float(px2)
+                if rnd.random() < 0.30:
+                    xa += rnd.uniform(60, 700)
+                if rnd.random() < 0.30:
+                    xb -= rnd.uniform(60, 700)
+                cv.create_line(xa, y + rnd.uniform(-0.7, 0.7),
+                               xb, y + rnd.uniform(-0.7, 0.7),
+                               fill=rnd.choice(PANEL_BRUSH_LIGHT), width=1)
+            elif d < 0.56:
+                cv.create_line(px1, y + rnd.uniform(-0.7, 0.7),
+                               px2, y + rnd.uniform(-0.7, 0.7),
+                               fill=rnd.choice(PANEL_BRUSH_DARK), width=1)
+            y += 2.5
+
+        # 4) Grain de surface (poudre martelée) : stries courtes horizontales
+        for _ in range(320):
+            sx = rnd.uniform(px1, px2)
+            sy = rnd.uniform(py1, py2)
+            cv.create_line(sx, sy, sx + rnd.uniform(2, 6), sy,
+                           fill=rnd.choice(PANEL_GRAIN), width=1)
+
+        # 5) Vis du panneau, dans les marges en bois
+        for (sx, sy) in PANEL_SCREWS:
+            cv.create_oval(sx - 6, sy - 6, sx + 6, sy + 6,
+                           fill="#6f747b", outline="#2a2c30", width=1)
+            cv.create_oval(sx - 4, sy - 4, sx + 4, sy + 4,
+                           fill="#8b9098", outline="#565a61", width=1)
+            a = rnd.uniform(0.0, math.pi)
+            r = 3.4
+            cv.create_line(sx - r * math.cos(a), sy - r * math.sin(a),
+                           sx + r * math.cos(a), sy + r * math.sin(a),
+                           fill="#33363b", width=2, capstyle="round")
+
     def _build_panel(self):
+        self._paint_background()
         cv = self.cv
         self._box(30, 30, 1440, 76, "MINIMOOG MODEL D — état temps réel")
         self._box(30, 120, 310, 520, "MOD / GLIDE / OUT")
@@ -924,8 +1153,10 @@ class App:
         #   col2 (x=235) : MOD OSC 210, CTRL OSC3 330, REVERB 450, écran 540+
         # Le bloc reverb (pot J50 + afficheur) reste en bas à droite.
         self.switch("decay", 95, 570, "DECAY",
+                     color=MD_WHITE,
                     help="DECAY : réglage des temps de déclin des enveloppes.")
         self.switch("glideOn", 95, 450, "GLIDE ON",
+                     color=MD_WHITE,
                     help="GLIDE ON : active le glissement tonal (portamento) "
                          "entre les notes jouées en séquence.")
         self.knob("glide", 95, 330, "GLIDE", fmt="{:.0%}",
@@ -935,17 +1166,23 @@ class App:
                   help="MOD MIX : quantité de modulation provenant du VCO3/LFO "
                        "(envoyée vers la hauteur, le filtre et le volume).")
         self.switch("ctrlOsc3", 235, 330, "CTRL OSC3",
+                     color=MD_ORANGE, orient="v",
                     help="CTRL OSC3 : passe le VCO3 en mode contrôle (LFO) au "
                          "lieu d'une oscillation audible.")
         self.switch("modOsc", 235, 210, "MOD OSC",
+                     color=MD_ORANGE,
                     help="MOD OSC : achemine la sortie du VCO3 vers la chaîne "
                          "de modulation (vibrato / filtre / gain).")
         # Pot REVERB dédié (J50, Mux2/C14) : reste dans ce panneau.
         self.knob("reverb", 235, 450, "REVERB", fmt="{:.0%}",
-                  help="REVERB : niveau de la réverbération (pot dédié J50). "
-                       "0 % = reverb coupée. Le type d'algo (ROOM / HALL / "
-                       "PLATE / SPRING) se choisit avec le bouton PUSH du "
-                       "VCO2, en mode REVERB.")
+                  help="J50 : pot PARTAGÉ REVERB / DELAY. Le libellé suit la "
+                       "cible courante — ENC2 en mode 2 = reverb, mode 3 = "
+                       "delay (la LED VCO2 clignote) — et chaque effet garde "
+                       "son propre niveau mémoire : en changeant de mode le "
+                       "pot ne reprend la main qu'en le tournant. 0 % = effet "
+                       "coupé. La rotation de ENC2 choisit ensuite l'algorithme "
+                       "(ROOM/HALL/PLATE/SPRING) ou la durée "
+                       "(60/120/240/480 ms).")
         # Indicateur reverb façon écran 80s : valeur en % (ambre), LED de
         # service, label en dessous.
         self.top["revPanel"] = cv.create_rectangle(
@@ -981,14 +1218,19 @@ class App:
         self.knob("volN", 905, 570, "NOISE VOL",
                   help="NOISE VOL : volume du bruit (couleur selon NOISE TYPE).")
         self.switch("mixOn1", 970, 210, "OSC1",
+                     color=MD_BLUE,
                     help="Envoie l'oscillateur 1 au mixer.")
         self.switch("mixOn2", 970, 330, "OSC2",
+                     color=MD_BLUE,
                     help="Envoie l'oscillateur 2 au mixer.")
         self.switch("mixOn3", 970, 450, "OSC3",
+                     color=MD_BLUE,
                     help="Envoie l'oscillateur 3 au mixer.")
         self.switch("mixOnN", 970, 570, "NOISE",
+                     color=MD_BLUE,
                     help="Envoie le bruit au mixer.")
         self.switch("typeNoise", 1050, 450, "NOISE TYPE",
+                     color=MD_BLACK, orient="v",
                     states=("PINK", "WHITE"),
                     help="NOISE TYPE : couleur du bruit — rose (PINK) ou blanc "
                          "(WHITE).")
@@ -1000,14 +1242,33 @@ class App:
                        "interne du signal (la sortie est réinjectée avant le "
                        "filtre, hack Model D). 0 % = entrée coupée ; > 0 % = "
                        "le feedback est mélangé au mixer.")
+        # LED OVERLOAD (GUI seulement) : à droite du potar EXT VOL, rouge quand
+        # le mixer sature (estimation — voir _update_overload).
+        self.top["ovlGlow"] = cv.create_oval(
+            1093 - 8, 570 - 8, 1093 + 8, 570 + 8, fill="", outline="")
+        self.top["ovlLed"] = cv.create_oval(
+            1093 - 5, 570 - 5, 1093 + 5, 570 + 5,
+            fill="#3a2020", outline="#1a0d0d", width=1)
+        self.top["ovlTxt"] = cv.create_text(
+            1093, 588, text="OVLD", font=("Helvetica", 7, "bold"),
+            fill="#7a828b")
+        self._tips.append((1063, 544, 1120, 598,
+                           "OVERLOAD : lampe de saturation de sortie (façon "
+                           "Model D). La GUI ne reçoit pas l'audio : elle "
+                           "estime le niveau par la somme des sources actives "
+                           "du mixer (OSC1/2/3, bruit, feedback EXT) pondérée "
+                           "par l'enveloppe LOUDNESS. Rouge = ça sature."))
         # groupés verticalement, alignés sur la zone filter (ils agissent dessus)
         self.switch("filtMod", 1062, 210, "FILT MOD",
+                     color=MD_ORANGE,
                     help="FILT MOD : applique la modulation (molette MOD, VCO3 "
                          "en LFO) au filtre.")
         self.switch("kbd1", 1062, 265, "KBD CTL1",
+                     color=MD_WHITE,
                     help="KBD CTL1 : le clavier pilote la fréquence de coupure "
                          "du filtre (1 V/octave, façon Model D).")
         self.switch("kbd2", 1062, 330, "KBD CTL2",
+                     color=MD_WHITE,
                     help="KBD CTL2 : contrôle partiel du clavier sur la "
                          "coupure du filtre.")
 
@@ -1020,7 +1281,12 @@ class App:
                        "peut s'auto-osciller en haut.")
         self.knob("amt", 1349, 210, "CONTOUR", fmt="{:.0%}",
                   help="CONTOUR : profondeur du contrôle de l'enveloppe de "
-                       "filtre sur la coupure.")
+                       "filtre sur la coupure. La vélocité des notes MIDI la "
+                       "module en dessous (courbe racine carrée : une frappe "
+                       "légère pèse déjà), atténuée par la jauge VEL FILT "
+                       "(CC9). 0 % = vélocité ignorée, 100 % = note douce → "
+                       "~10 % du CONTOUR, note franche → valeur affichée. "
+                       "Extension : le Model D d'origine n'a pas de vélocité.")
         self.knob("fAtk", 1185, 340, "F ATK", lo=0.01, hi=10, fmt="{:.2f}s",
                   norm=norm_env_time,
                   help="F ATK : temps d'attaque de l'enveloppe de filtre "
@@ -1044,13 +1310,16 @@ class App:
             push_help = ("rappelle un patch de la banque (mode PATCH, "
                          "LED clignote)."
                          if i != 1 else
-                         "choisit le type de réverbération (ROOM/HALL/PLATE/"
-                         "SPRING) ; le niveau reste sur le pot REVERB (J50).")
+                         "passe de reverb à delay (LED clignote) : la rotation "
+                         "choisit alors l'algorithme ROOM/HALL/PLATE/SPRING ou "
+                         "la durée 60/120/240/480 ms ; le niveau des deux "
+                         "effets reste sur le pot partagé J50.")
             self.knob(f"wave{i}", 475, y, "WAVEFORM", lo=0, hi=5,
                       fmt=lambda v: WAVES[int(v)], wave=1,
                       help=f"WAVEFORM du VCO {i+1} : Tri / Tri-Saw / Scie / "
                            "Carré / Imp30 / Imp15.")
             self.switch(f"vco{i}sw", 580, y, "PUSH",
+                         color=MD_WHITE,
                         blink_txt="PATCH" if i == 0 else ("REVERB" if i == 1 else "PATCH"),
                         help=f"PUSH (VCO {i+1}) : bouton poussoir — " + push_help)
             self.knob(f"range{i}", 660, y, "RANGE", lo=1, hi=6,
@@ -1058,8 +1327,13 @@ class App:
                       help=f"RANGE du VCO {i+1} : gamme 32' (grave) → 2' (aigu) "
                            "+ Lo (note la plus grave).")
             if has_det:
+                # Teintes distinctes : OSC2 = violet, OSC3 = orange — les deux
+                # potards sont identiques physiquement, on les distingue ici
+                # par l'étiquette, l'échelle, la couronne et l'index. (Le violet
+                # évite la confusion avec le cyan du mode gel de patch.)
                 self.knob(f"det{i}", 730, y, f"FREQ OSC{i+1}",
                           lo=-7, hi=7, fmt="{:+.1f} st",
+                          accent=("#b06bff", "#ff8c3a")[i - 1],
                           help=f"FREQ OSC{i+1} : désaccord fin (demi-tons, "
                                "−7..+7) de l'oscillateur {i+1} par rapport au "
                                "VCO 1 — épaissit le son par battements.")
@@ -1079,23 +1353,35 @@ class App:
 
         # --- Clavier (x 30..1470) — molettes pitch/mod à gauche,
         # 49 notes, la touche jouée s'enfonce
-        self.pitchw = Wheel(self.cv, 140, 682, 52, 146, "PITCH",
+        self.pitchw = Wheel(self.cv, 140, 682, 52, 136, "PITCH",
                             lo=-2.0, hi=2.0, color="#ffd24a",
-                            fmt="{:+.1f} st")
-        self.modw = Wheel(self.cv, 205, 682, 52, 146, "MOD",
+                            fmt="{:+.1f} st", detent=True)
+        self.modw = Wheel(self.cv, 205, 682, 52, 136, "MOD",
                           lo=0.0, hi=1.0, color="#7cd4ff", fmt="{:.0%}")
         # Atténuateur de modulation = pot "Mod Depth" du Model D (CC3, knob K1
         # du MPK249) : il borne la profondeur MAX de la molette. Jauge compacte
         # sous la molette MOD (elle n'a pas de pot physique sur le panneau).
-        self.cv.create_text(205, 856, text="MOD DEPTH",
+        self.cv.create_text(205, 862, text="MOD DEPTH",
                             font=("Helvetica", 8), fill="#8b939c")
-        self.cv.create_rectangle(140, 866, 270, 872, fill="#1b1f25",
+        self.cv.create_rectangle(140, 872, 270, 878, fill="#1b1f25",
                                  outline="#2f353c")
-        self.moddep_bar = self.cv.create_rectangle(142, 868, 142, 870,
+        self.moddep_bar = self.cv.create_rectangle(142, 874, 142, 876,
                                                    fill="#7cd4ff", outline="")
-        self.moddep_val = self.cv.create_text(205, 884, text="",
+        self.moddep_val = self.cv.create_text(205, 890, text="",
                                               font=("Helvetica", 8, "bold"),
                                               fill="#d8d8d8")
+        # Atténuateur vélocité -> CONTOUR (CC9, knob du MPK249) : même
+        # principe que MOD DEPTH. 0 % = la vélocité est ignorée, 100 % = une
+        # note douce n'ouvre presque pas l'enveloppe de coupure.
+        self.cv.create_text(400, 862, text="VEL FILT",
+                            font=("Helvetica", 8), fill="#8b939c")
+        self.cv.create_rectangle(335, 872, 465, 878, fill="#1b1f25",
+                                 outline="#2f353c")
+        self.velf_bar = self.cv.create_rectangle(337, 874, 337, 876,
+                                                 fill="#ffb14a", outline="")
+        self.velf_val = self.cv.create_text(400, 890, text="",
+                                            font=("Helvetica", 8, "bold"),
+                                            fill="#d8d8d8")
         self.kbd = Keyboard(self.cv, 275, 695, 1150, 120, midi0=36, midi1=84,
                             note_cb=self._play_key)
         self.pitchw.update(0.0)
@@ -1108,17 +1394,26 @@ class App:
                            "de modulation (CC1) du clavier maître — vibrato par "
                            "le VCO3/LFO et ouverture du filtre. 100 % = pleine "
                            "course de la molette."))
+        self._tips.append((335, 850, 465, 890, "VEL FILT (CC9) : att\u00e9nuateur "
+                           "de la v\u00e9locit\u00e9 sur le CONTOUR du filtre. 0 % = "
+                           "v\u00e9locit\u00e9 ignor\u00e9e, 100 % = note douce -> peu "
+                           "d'enveloppe, note franche -> course pleine."))
         self._tips.append((275, 684, 1425, 822, "Clavier à la souris : cliquer "
                            "ou glisser sur les touches joue la note (commande N), "
                            "relâcher l'arrête (X). Fonctionne en mode SÉRIE "
                            "seulement ; en MIDI (RX coupée) il reste visuel."))
-        self._tips.append((190, 535, 280, 614, "Réverbération : niveau par le pot "
-                           "REVERB dédié (J50, juste au-dessus) et algorithme "
-                           "par le poussoir VCO2 — ROOM / HALL / PLATE / "
-                           "SPRING."))
+        self._tips.append((190, 535, 280, 614, "EFFETS : niveau par le pot J50 "
+                           "partagé (juste au-dessus) — REVERB en mode 2 de "
+                           "ENC2, DELAY en mode 3 (la LED VCO2 clignote). Les "
+                           "deux niveaux sont mémorisés séparément. La rotation "
+                           "de ENC2 choisit l'algorithme (ROOM/HALL/PLATE/"
+                           "SPRING) ou la durée (60/120/240/480 ms)."))
 
     # ------------------------------------------------------------- données
     def _update_all(self, d, sw, locks=0):
+        # Pot J50 partagé REVERB/DELAY : cible exactement celle du firmware
+        # (fxCible) — ENC2 en mode 3 pilote le delay, sinon la reverb.
+        actif_dly = int(d.get("modR1", 0) or 0) == 3
         for name, k in self.knobs.items():
             idx = {"vol1": "vol1", "vol2": "vol2", "vol3": "vol3",
                    "volN": "volN", "cut": "cut", "res": "res",
@@ -1135,9 +1430,13 @@ class App:
             elif name == "extVol":
                 locked = bool(locks & (1 << LOCK_EXT_BIT))
             elif name == "reverb":
-                locked = bool(locks & (1 << LOCK_REVERB_BIT))
+                locked = bool(locks & (1 << (LOCK_DELAY_BIT if actif_dly
+                                             else LOCK_REVERB_BIT)))
             if idx and idx in d:
-                k.update(d[idx], locked)
+                val = d[idx]
+                if name == "reverb" and actif_dly:
+                    val = d.get("delaylevel", 0.0)
+                k.update(val, locked)
             elif name.startswith("wave"):
                 k.update(d.get(f"wave{name[-1]}", 0), locked)
             elif name.startswith("range"):
@@ -1155,11 +1454,14 @@ class App:
             if locks & (1 << LOCK_EXT_BIT):
                 needle_fill, value_fill = "#00e5ff", "#00e5ff"
             elif d.get("ext", 0.0) > 0.02:
-                needle_fill, value_fill = "#ff8c3a", "#ffd24a"
+                needle_fill, value_fill = "#efe9dc", "#ffd24a"
             else:
                 needle_fill, value_fill = "#4a525b", "#5a6470"
             self.cv.itemconfigure(ek.idv["needle"], fill=needle_fill)
             self.cv.itemconfigure(ek.idv["value"], fill=value_fill)
+        if "vco1sw" in self.switches:
+            self.switches["vco1sw"].blink_txt = ("DELAY" if actif_dly
+                                                 else "REVERB")
         for i in range(3):
             if f"vco{i}sw" in self.switches:
                 self.switches[f"vco{i}sw"].update(d.get(f"modR{i}", 0))
@@ -1168,10 +1470,16 @@ class App:
         # donc le knob OSC2 VOL affiche toujours le volume d'OSC2.
         if "vol2" in self.knobs:
             self.knobs["vol2"].fmt = "{:.2f}"
-        # Indicateur reverb façon écran 80s : valeur en % (ambre) + LED de service
+        # Indicateur FX façon écran 80s : il suit la cible courante du pot
+        # J50 (reverb en mode ENC2 != 3, delay en mode ENC2 == 3). Les deux
+        # niveaux restent mémoarisés de chaque côté, la ligne 1 les montre
+        # tous les deux, la ligne 2 détaille l'FX actif.
         if "rev" in self.top:
-            on = d.get("reverb", 0.0) > 0.001
-            pct = max(0.0, min(1.0, d.get("reverb", 0.0)))
+            ron = d.get("reverb", 0.0) > 0.001
+            don = d.get("delaylevel", 0.0) > 0.001
+            on = don if actif_dly else ron
+            lvl = d.get("delaylevel", 0.0) if actif_dly else d.get("reverb", 0.0)
+            pct = max(0.0, min(1.0, lvl))
             txt = "{:02d}%".format(int(round(pct * 100)))
             self.cv.itemconfigure(
                 self.top["revValue"], text=txt,
@@ -1183,14 +1491,75 @@ class App:
                 self.top["revLed"],
                 fill="#ff4a4a" if on else "#3a4048")
             self.cv.itemconfigure(
-                self.top["rev"], text="REVERB ON" if on else "REVERB off",
-                fill="#3bff5a" if on else "#3a4048")
-            # Type d'algo (ENC2 mode reverb) : ROOM / HALL / PLATE / SPRING
-            rt = int(d.get("revtype", 0) or 0)
-            noms = ("ROOM", "HALL", "PLATE", "SPRING")
+                self.top["revUnit"], text="FX",
+                fill="#ffb14a" if on else "#7a828b")
+            rp = int(round(max(0.0, min(1.0, d.get("reverb", 0.0))) * 100))
+            dp = int(round(max(0.0, min(1.0, d.get("delaylevel", 0.0))) * 100))
+            self.cv.itemconfigure(
+                self.top["rev"],
+                text="REV {:02d}%  DLY {:02d}%".format(rp, dp),
+                fill="#c8ccd0" if (ron or don) else "#3a4048")
+            if actif_dly:
+                noms = ("60MS", "120MS", "240MS", "480MS")
+                rt = int(d.get("delaytype", 0) or 0)
+            else:
+                noms = ("ROOM", "HALL", "PLATE", "SPRING")
+                rt = int(d.get("revtype", 0) or 0)
             self.cv.itemconfigure(
                 self.top["revType"], text=noms[rt % len(noms)],
                 fill="#7cd4ff" if on else "#3a4048")
+            # Libellé du pot J50 : il suit la cible, pas toujours « REVERB ».
+            if "reverb" in self.knobs:
+                self.cv.itemconfigure(
+                    self.knobs["reverb"].idv["label"],
+                    text="DELAY" if actif_dly else "REVERB")
+
+    # ------------------------------------------------------------- overload
+    def _update_overload(self, d, sw, gate):
+        """LED OVERLOAD (GUI uniquement) : estime la saturation de sortie.
+
+        La GUI ne reçoit pas l'audio ; on approche le niveau par la somme des
+        sources actives du mixer (switchs OSC1/2/3 + NOISE), au feedback de
+        l'entrée externe, le tout pondéré par une enveloppe LOUDNESS simulée
+        localement (lAtk/lDec/lSus + tenue de note `gate`).
+        """
+        total = 0.0
+        for idx, key in ((2, "vol1"), (3, "vol2"), (4, "vol3"), (5, "volN")):
+            if idx < len(sw) and sw[idx]:
+                total += max(0.0, min(1.0, d.get(key, 0.0)))
+        # Feedback de l'entrée externe (réinjecté avant le filtre côté firmware)
+        total += max(0.0, min(1.0, d.get("ext", 0.0)))
+
+        # Enveloppe LOUDNESS simulée (attaque -> déclin vers sustain -> relâche)
+        t = time.time()
+        dt = max(0.0, min(0.2, t - self._ovl_t))
+        self._ovl_t = t
+        atk = max(0.01, d.get("lAtk", 0.01))
+        dec = max(0.01, d.get("lDec", 0.01))
+        sus = max(0.0, min(1.0, d.get("lSus", 0.0)))
+        env = self._ovl_env
+        if gate:
+            if env < 1.0:
+                env += (1.0 - env) * min(1.0, dt / atk)
+                if env > 0.999:
+                    env = 1.0
+            else:
+                env += (sus - env) * min(1.0, dt / dec)
+        else:
+            env += (0.0 - env) * min(1.0, dt / dec)
+        env = max(0.0, min(1.0, env))
+        self._ovl_env = env
+
+        if total * env >= OVERLOAD_THRESHOLD:
+            self._ovl_lit_until = t + OVERLOAD_HOLD
+        on = t < self._ovl_lit_until
+        if "ovlLed" in self.top:
+            self.cv.itemconfigure(
+                self.top["ovlGlow"], fill="#ff5a3c" if on else "")
+            self.cv.itemconfigure(
+                self.top["ovlLed"], fill="#ff3b30" if on else "#3a2020")
+            self.cv.itemconfigure(
+                self.top["ovlTxt"], fill="#ff6b5e" if on else "#7a828b")
 
     def _parse(self, line):
         # ACK/NACK du firmware lors d'un rappel de patch (commande L)
@@ -1285,6 +1654,24 @@ class App:
                 moddepth = float(parts[49])
             except (ValueError, IndexError):
                 moddepth = 1.0
+        veldepth = 1.0
+        if len(parts) > 50:
+            try:
+                veldepth = float(parts[50])
+            except (ValueError, IndexError):
+                veldepth = 1.0
+        delaylevel = 0.0
+        if len(parts) > 51:
+            try:
+                delaylevel = float(parts[51])
+            except (ValueError, IndexError):
+                delaylevel = 0.0
+        delaytype = 0
+        if len(parts) > 52:
+            try:
+                delaytype = int(parts[52])
+            except (ValueError, IndexError):
+                delaytype = 0
 
         nums = ["vol1", "vol2", "vol3", "volN", "freq2", "freq3",
                 "cut", "res", "amt", "fAtk", "fDec", "fSus",
@@ -1303,6 +1690,9 @@ class App:
         d["revtype"] = revtype
         d["ext"] = ext
         d["moddepth"] = moddepth
+        d["veldepth"] = veldepth
+        d["delaylevel"] = delaylevel
+        d["delaytype"] = delaytype
 
         self._last = d.copy()
         self._last["sw"] = sw
@@ -1312,6 +1702,7 @@ class App:
             self._push_bank()
 
         self._update_all(d, sw, locks)
+        self._update_overload(d, sw, bool(midiOn))
 
         for i in range(3):
             self.cv.itemconfigure(
@@ -1336,13 +1727,22 @@ class App:
         self.modw.update(modW / MOD_WHEEL_NORM)
         # Atténuateur (CC3) : 0 % = molette inerte -> barre et valeur grisées
         md = max(0.0, min(1.0, d.get("moddepth", 1.0)))
-        self.cv.coords(self.moddep_bar, 142, 868,
-                       142 + 126 * md if md > 0.004 else 142.5, 870)
+        self.cv.coords(self.moddep_bar, 142, 874,
+                       142 + 126 * md if md > 0.004 else 142.5, 876)
         self.cv.itemconfigure(self.moddep_bar,
                               fill="#7cd4ff" if md > 0.004 else "#39414a")
         self.cv.itemconfigure(self.moddep_val,
                               text=f"{md:.0%}",
                               fill="#d8d8d8" if md > 0.004 else "#5a6470")
+        # Attnuateur vélocité (CC9) : même rendu, teinte ambre (couleur du filtre)
+        vd = max(0.0, min(1.0, d.get("veldepth", 1.0)))
+        self.cv.coords(self.velf_bar, 337, 874,
+                       337 + 126 * vd if vd > 0.004 else 337.5, 876)
+        self.cv.itemconfigure(self.velf_bar,
+                              fill="#ffb14a" if vd > 0.004 else "#39414a")
+        self.cv.itemconfigure(self.velf_val,
+                              text=f"{vd:.0%}",
+                              fill="#d8d8d8" if vd > 0.004 else "#5a6470")
 
     def _demo_feed(self):
         t = time.time()
@@ -1360,9 +1760,13 @@ class App:
             "range0": 2, "range1": 4, "range2": 6,
             "modR0": 1, "modR1": 0, "modR2": 1,
             "reverb": 0.45, "revtype": int(t) % 4, "ext": 0.2 + 0.3 * math.sin(t), "moddepth": 0.5 + 0.5 * math.sin(t * 0.7),
+            "veldepth": 0.5 + 0.5 * math.sin(t * 1.3),
+            "delaylevel": 0.5 + 0.4 * math.sin(t * 0.6),
+            "delaytype": int(t) % 4,
         }
         sw0 = [0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1]
         self._update_all(d, sw0)
+        self._update_overload(d, sw0, bool(int(t) % 2))
         for i in range(3):
             self.cv.itemconfigure(self.top[f"vco{i}"],
                                   text=f"VCO {i+1}")
