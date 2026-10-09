@@ -17,7 +17,13 @@ champs suivants : extVol (pot J49), modDepth (CC3), velDepth (CC9),
 lockMask : hex "lo.hi" — bits à 1 = contrôle figé sur la valeur du patch
           (39 bits : 0-12 switchs, 13-29 pots, 30-35 wave/range, 36 EXT VOL,
            37 NIVEAU REVERB, 38 NIVEAU DELAY)
- (rétention latch, affiché en ambre)
+  (rétention latch, affiché en ambre)
+
+Dernier champ de la trame : ledBright (0..1, luminosité PWM des 3 LEDs
+physiques OSC1/2/3 sur l'ESP32). Le curseur LED BRIGHT de la bande du bas
+l'envoie au firmware (commande série 'W<0-100>') ; le clavier maître peut
+aussi la régler en MIDI CC14.
+
 
 Lignes 'M' (moniteur MIDI, émises par le firmware en mode MIDI, une par
 message reçu) : "M,<statusHEX>,<d0>,<d1>". Affiche les 2 dernières en haut,
@@ -34,6 +40,13 @@ Bouton SAVE : capture l'état courant et l'ajoute à patches.json.
 Bouton RESET : envoie la commande série 'R' (retour aux valeurs d'usine,
 déverrouille les potards et sort du mode patch). En mode MIDI (RX série
 coupée), il déclenche un reset matériel DTR/RTS puis repousse la banque.
+
+CC MIDI : la correspondance des contrôleurs (molette, mod depth, vel filt,
+LED bright, chargement de patch) est définie dans config.json (source de
+vérité sur le PC) et poussée au firmware par la commande série
+'C mw,md,vd,lb,pl' au branchement puis à chaque modification (bouton CONFIG) —
+donc modifiable sans reflash. Le firmware renvoie la table active en fin de
+trame P (champs ccMW/ccMD/ccVD/ccLB/ccPL), affichée dans la boîte CONFIG.
 
 Usage :
     python3 panel_minimoog.py /dev/ttyUSB0          (port explicite)
@@ -120,6 +133,30 @@ OVERLOAD_HOLD = 0.35        # s : la LED reste allumée après un pic (persistan
 
 PATCHES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "patches.json")
+
+# --- Configuration MIDI (paramétrable depuis la GUI, conservée en JSON) ------
+# Table des CC utilisés par le firmware, poussée par la commande série
+# 'C <mw>,<md>,<vd>,<lb>,<pl>' (cf. minimoog.ino). Les clés sont les mêmes que
+# dans la trame P ; ce fichier est la source de vérité côté PC.
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "config.json")
+DEFAULT_CONFIG = {
+    "cc_modwheel": 1,    # molette de modulation
+    "cc_moddepth": 3,    # atténuateur "Mod Depth" (knob K1)
+    "cc_veldepth": 9,    # atténuateur vélocité → CONTOUR (knob MPK249)
+    "cc_ledbright": 14,  # luminosité des LEDs OSC1/2/3
+    "cc_patch": 122,     # chargement de patch (value 1-5)
+}
+# Ordre exact attendu par la commande série 'C' du firmware :
+CC_ORDER = ["cc_modwheel", "cc_moddepth", "cc_veldepth",
+            "cc_ledbright", "cc_patch"]
+CC_LABELS = [
+    ("cc_modwheel", "Molette modulation"),
+    ("cc_moddepth", "Mod Depth (atténuateur)"),
+    ("cc_veldepth", "Vel Filt (atténuateur)"),
+    ("cc_ledbright", "LED bright (luminosité)"),
+    ("cc_patch", "Chargement de patch"),
+]
 
 # Inverse du mapping firmware des temps d'enveloppe (0.01 s * 1000^rotation) :
 # transforme une durée en secondes -> fraction de rotation 0..1 de l'aiguille.
@@ -642,6 +679,7 @@ class App:
         self._bank_pushed = True
         self._bank_sync = -1
         self.patches = self._load_patches()
+        self.config = self._load_config()
         self._tips = []
         self._tip_last = None
         self.tt = ToolTip()
@@ -650,11 +688,18 @@ class App:
         self._ovl_env = 0.0          # enveloppe LOUDNESS simulée (LED OVERLOAD)
         self._ovl_t = time.time()
         self._ovl_lit_until = 0.0    # maintien visuel de la LED OVERLOAD
+        self._led_drag = False       # curseur LED BRIGHT en cours de glissé ?
+        self._led_val = 1.0          # dernière luminosité LEDs (0..1)
+        self._led_sent = -1          # dernier pourcent W envoyé au firmware
         self._build_panel()
         self._build_patch_widgets()
         self.cv.bind("<Enter>", self._tip_motion)
         self.cv.bind("<Motion>", self._tip_motion)
         self.cv.bind("<Leave>", lambda e: self._tip_clear())
+        # Curseur LED BRIGHT : bindings additifs (le clavier garde les siens).
+        self.cv.bind("<ButtonPress-1>", self._on_led_down, add="+")
+        self.cv.bind("<B1-Motion>", self._on_led_drag, add="+")
+        self.cv.bind("<ButtonRelease-1>", self._on_led_up, add="+")
 
         if serial and not demo and self.port:
             try:
@@ -676,6 +721,7 @@ class App:
                 # (sinon il bascule MIDI, RX coupée, et les B! n'arrivent plus).
                 # setRxBufferSize(4096) côté firmware absorbe le déluge.
                 self._bank_pushed = False
+                self.root.after(450, self._push_config)
                 self.root.after(500, self._push_bank)
             except Exception as e:
                 self.cv.itemconfigure(self.top["port"],
@@ -716,13 +762,15 @@ class App:
 
     # ------------------------------------------------------------- tooltips
     def _tip_motion(self, event):
-        """Affiche la bulle du contrôle sous le pointeur (test du canvas)."""
+        """Affiche la bulle du contrôle sous le pointeur (test du canvas).
+        Le texte peut être une chaîne ou un callable (résolu à l'affichage)
+        pour rester à jour si la config des CC change."""
         cur = None
         for (x1, y1, x2, y2, text) in self._tips:
             if x1 <= event.x <= x2 and y1 <= event.y <= y2:
-                cur = text
+                cur = text() if callable(text) else text
                 break
-        if cur is not self._tip_last:
+        if cur != self._tip_last:
             self._tip_last = cur
             if cur:
                 self.tt.show(cur, event.x_root, event.y_root)
@@ -734,13 +782,17 @@ class App:
         self.tt.hide()
 
     def _btn_tip(self, widget, text):
-        """Attache une bulle à un vrai widget Tk (bouton, liste...)."""
+        """Attache une bulle à un vrai widget Tk (bouton, liste...).
+        `text` peut être une chaîne ou un callable."""
         if widget is None:
             return
-        widget.bind("<Enter>",
-                    lambda e: self.tt.show(text, e.x_root, e.y_root))
-        widget.bind("<Motion>",
-                    lambda e: self.tt.show(text, e.x_root, e.y_root))
+
+        def _show(e):
+            t = text() if callable(text) else text
+            self.tt.show(t, e.x_root, e.y_root)
+
+        widget.bind("<Enter>", _show)
+        widget.bind("<Motion>", _show)
         widget.bind("<Leave>", lambda e: self.tt.hide())
 
     # ------------------------------------------------------------- patches
@@ -756,6 +808,165 @@ class App:
     def _save_patches(self):
         with open(PATCHES_FILE, "w", encoding="utf-8") as f:
             json.dump({"patches": self.patches}, f, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------- config MIDI (CC)
+    def _load_config(self):
+        """Charge la config MIDI depuis config.json (complète les manquants)."""
+        cfg = dict(DEFAULT_CONFIG)
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for k in DEFAULT_CONFIG:
+                if k in data:
+                    v = int(data[k])
+                    if 0 <= v <= 127:
+                        cfg[k] = v
+        except Exception:
+            pass
+        return cfg
+
+    def _save_config(self):
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(self.config, f, ensure_ascii=False, indent=2)
+
+    def _cc(self, key):
+        """Numéro de CC courant (config.json) — utilisé par les bulles d'aide
+        pour qu'elles restent à jour quand la config change."""
+        try:
+            return int(self.config.get(key, DEFAULT_CONFIG[key]))
+        except Exception:
+            return int(DEFAULT_CONFIG[key])
+
+    def _push_config(self):
+        """Envoie la table des CC au firmware (commande 'C mw,md,vd,lb,pl')."""
+        if not (self.ser and getattr(self.ser, "is_open", False)):
+            return
+        try:
+            vals = ",".join(str(int(self.config[k])) for k in CC_ORDER)
+            self.ser.write(("C %s\n" % vals).encode())
+            self.ser.flush()
+        except Exception:
+            pass
+
+    def _open_config(self):
+        """Ouvre la boîte de dialogue de paramétrage des CC MIDI."""
+        dlg = getattr(self, "_cfg_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            dlg.focus_force()
+            return
+        dlg = tk.Toplevel(self.root)
+        self._cfg_dlg = dlg
+        dlg.title("CONFIG — CC MIDI")
+        dlg.configure(bg="#1c2128")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+
+        tk.Label(dlg, text="Correspondance des CC MIDI", bg="#1c2128",
+                 fg="#ffd24a", font=("Helvetica", 13, "bold")
+                 ).grid(row=0, column=0, columnspan=3, sticky="w",
+                        padx=18, pady=(14, 0))
+        tk.Label(dlg, text="Numéros 0..127 (identiques au clavier maître). "
+                 "Enregistré dans config.json puis envoyé\nau synthé (commande "
+                 "C) : aucun reflash nécessaire.",
+                 justify="left", bg="#1c2128", fg="#9aa3ad",
+                 font=("Helvetica", 8)).grid(row=1, column=0, columnspan=3,
+                                             sticky="w", padx=18, pady=(2, 10))
+
+        vars_ = {}
+        for r, (key, label) in enumerate(CC_LABELS, start=2):
+            tk.Label(dlg, text=label, bg="#1c2128", fg="#e8e4dc",
+                     font=("Helvetica", 10), anchor="w"
+                     ).grid(row=r, column=0, sticky="w", padx=(18, 10), pady=3)
+            var = tk.IntVar(value=int(self.config.get(key,
+                                                      DEFAULT_CONFIG[key])))
+            vars_[key] = var
+            tk.Spinbox(dlg, from_=0, to=127, width=5, textvariable=var,
+                       font=("Courier", 12, "bold"), justify="center",
+                       bg="#2b313a", fg="#e8e4dc",
+                       buttonbackground="#39414a", relief="flat",
+                       highlightthickness=0, insertbackground="#e8e4dc"
+                       ).grid(row=r, column=1, sticky="e", padx=(0, 6), pady=3)
+
+        # Rappel des CC réellement actifs dans le firmware (si la trame les
+        # renvoie) : permet de repérer une éventuelle désynchro.
+        fw = (getattr(self, "_last", None) or {}).get("cc_fw")
+        fw_txt = " / ".join(str(x) for x in fw) if (fw and len(fw) == 5) else "—"
+        base = 2 + len(CC_LABELS)
+        tk.Label(dlg, text="CC actifs dans le firmware : " + fw_txt,
+                 bg="#1c2128", fg="#7fb3ff", font=("Courier", 8)
+                 ).grid(row=base, column=0, columnspan=3, sticky="w",
+                        padx=18, pady=(10, 0))
+
+        bar = tk.Frame(dlg, bg="#1c2128")
+        bar.grid(row=base + 1, column=0, columnspan=3, pady=12)
+
+        def set_defaults():
+            for k, v in DEFAULT_CONFIG.items():
+                vars_[k].set(v)
+
+        for txt, bgc, cmd in (
+                ("Défauts", "#37474f", set_defaults),
+                ("Annuler", "#5a3a3a", self._close_cfg),
+                ("Enregistrer", "#2e7d32", lambda: self._save_cfg(vars_))):
+            tk.Button(bar, text=txt, command=cmd, bg=bgc, fg="#ffffff",
+                      relief="raised", bd=2, padx=10, pady=2,
+                      cursor="hand2").pack(side="left", padx=4)
+
+        dlg.protocol("WM_DELETE_WINDOW", self._close_cfg)
+        dlg.update_idletasks()
+        try:
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+            dw, dh = dlg.winfo_width(), dlg.winfo_height()
+            dlg.geometry("+%d+%d" % (rx + max(0, (rw - dw) // 2),
+                                     ry + max(0, (rh - dh) // 2)))
+        except Exception:
+            pass
+        try:
+            dlg.grab_set()
+        except Exception:
+            pass
+
+    def _close_cfg(self):
+        dlg = getattr(self, "_cfg_dlg", None)
+        if dlg is not None:
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+        self._cfg_dlg = None
+
+    def _save_cfg(self, vars_):
+        labels = dict(CC_LABELS)
+        new = {}
+        for k in CC_ORDER:
+            try:
+                v = int(vars_[k].get())
+            except Exception:
+                v = -1
+            if not (0 <= v <= 127):
+                messagebox.showerror(
+                    "CONFIG — valeur invalide",
+                    "Le CC de « %s » doit être un nombre entre 0 et 127."
+                    % labels[k], parent=self.root)
+                return
+            new[k] = v
+        vals = list(new.values())
+        if len(set(vals)) != len(vals):
+            if not messagebox.askyesno(
+                    "CONFIG — CC en double",
+                    "Deux fonctions partagent le même CC. Continuer quand "
+                    "même ?", parent=self.root):
+                return
+        self.config = new
+        self._save_config()
+        self._push_config()
+        self._close_cfg()
 
     def _patch_to_line(self, p):
         """Convertit un dict patch (JSON) en ligne CSV pour la commande B du
@@ -942,6 +1153,8 @@ class App:
             self._midi_manual = False
             self._bank_pushed = False
             self.midi_btn.configure(text="MIDI", bg="#1b5e20")
+            # Le reboot remet la table des CC aux valeurs d'usine : re-pousser.
+            self.root.after(450, self._push_config)
             self.root.after(500, self._push_bank)
         except Exception:
             print("[GUI] Échec du reset série")
@@ -1147,6 +1360,19 @@ class App:
                       "courte ; ici on en voit les 2 dernières en haut. "
                       "Désactivable à volonté (actions GUI uniquement).")
 
+        # --- Bouton CONFIG : paramétrage des CC MIDI (config.json). Ouvre une
+        # boîte de dialogue ; la table est poussée au firmware (commande C).
+        self.cfg_btn = tk.Button(
+            self.root, text="CONFIG", font=("Helvetica", 9, "bold"),
+            bg="#4527a0", fg="#ffffff", activebackground="#5e35b1",
+            activeforeground="#ffffff", relief="raised", bd=2,
+            padx=8, pady=1, cursor="hand2", command=self._open_config)
+        cv.create_window(150, 91, window=self.cfg_btn, anchor="center")
+        self._btn_tip(self.cfg_btn, "CONFIG : correspondance des CC MIDI "
+                      "(molette, mod depth, vel filt, LED bright, chargement de "
+                      "patch). Enregistrée dans config.json et poussée au "
+                      "firmware (commande C) — modifiable sans reflash.")
+
         # --- Mod/Glide/Out (x 30..340) — 2 colonnes, lu de bas en haut puis
         # colonne suivante, pour suivre les câblages réels sur l'ESP32 :
         #   col1 (x=95)  : MOD MIX 210, GLIDE 330, GLIDE ON 450, DECAY 570
@@ -1280,13 +1506,15 @@ class App:
                   help="EMPHASIS : résonance du filtre — accentue la coupure, "
                        "peut s'auto-osciller en haut.")
         self.knob("amt", 1349, 210, "CONTOUR", fmt="{:.0%}",
-                  help="CONTOUR : profondeur du contrôle de l'enveloppe de "
+                  help=lambda: (
+                       "CONTOUR : profondeur du contrôle de l'enveloppe de "
                        "filtre sur la coupure. La vélocité des notes MIDI la "
                        "module en dessous (courbe racine carrée : une frappe "
                        "légère pèse déjà), atténuée par la jauge VEL FILT "
-                       "(CC9). 0 % = vélocité ignorée, 100 % = note douce → "
-                       "~10 % du CONTOUR, note franche → valeur affichée. "
-                       "Extension : le Model D d'origine n'a pas de vélocité.")
+                       "(CC%d). 0 %% = vélocité ignorée, 100 %% = note douce "
+                       "→ ~10 %% du CONTOUR, note franche → valeur affichée. "
+                       "Extension : le Model D d'origine n'a pas de vélocité."
+                       % self._cc("cc_veldepth")))
         self.knob("fAtk", 1185, 340, "F ATK", lo=0.01, hi=10, fmt="{:.2f}s",
                   norm=norm_env_time,
                   help="F ATK : temps d'attaque de l'enveloppe de filtre "
@@ -1382,22 +1610,39 @@ class App:
         self.velf_val = self.cv.create_text(400, 890, text="",
                                             font=("Helvetica", 8, "bold"),
                                             fill="#d8d8d8")
+        # Luminosité des 3 LEDs physiques d'encodeur (OSC1/2/3) : curseur
+        # horizontal cliquable/glissable. Envoie la commande série W<0-100>
+        # au firmware (PWM LEDC) ; réglable aussi au clavier maître via CC14
+        # (la position est alors renvoyée par la trame P).
+        self.cv.create_text(595, 862, text="LED BRIGHT",
+                            font=("Helvetica", 8), fill="#8b939c")
+        self.cv.create_rectangle(530, 872, 660, 878, fill="#1b1f25",
+                                 outline="#2f353c")
+        self.led_bar = self.cv.create_rectangle(532, 874, 532, 876,
+                                                fill="#e8e4dc", outline="")
+        self.led_val = self.cv.create_text(595, 890, text="",
+                                           font=("Helvetica", 8, "bold"),
+                                           fill="#d8d8d8")
         self.kbd = Keyboard(self.cv, 275, 695, 1150, 120, midi0=36, midi1=84,
                             note_cb=self._play_key)
         self.pitchw.update(0.0)
         self.modw.update(0.05)
+        self._led_ui(self._led_val)
 
         # --- Bulles d'aide des zones dessinées (wheels, clavier, reverb)
         self._tips.append((110, 668, 170, 846, "PITCH (lecture) : pitch bend "
                            "±7 demi-tons venant du clavier maître (MIDI)."))
-        self._tips.append((175, 668, 235, 846, "MOD : position de la molette "
-                           "de modulation (CC1) du clavier maître — vibrato par "
-                           "le VCO3/LFO et ouverture du filtre. 100 % = pleine "
-                           "course de la molette."))
-        self._tips.append((335, 850, 465, 890, "VEL FILT (CC9) : att\u00e9nuateur "
-                           "de la v\u00e9locit\u00e9 sur le CONTOUR du filtre. 0 % = "
-                           "v\u00e9locit\u00e9 ignor\u00e9e, 100 % = note douce -> peu "
-                           "d'enveloppe, note franche -> course pleine."))
+        self._tips.append((175, 668, 235, 846, lambda: (
+                           "MOD : position de la molette de modulation (CC%d) "
+                           "du clavier maître — vibrato par le VCO3/LFO et "
+                           "ouverture du filtre. 100 %% = pleine course de la "
+                           "molette." % self._cc("cc_modwheel"))))
+        self._tips.append((335, 850, 465, 890, lambda: (
+                           "VEL FILT (CC%d) : att\u00e9nuateur "
+                           "de la v\u00e9locit\u00e9 sur le CONTOUR du filtre. 0 %% = "
+                           "v\u00e9locit\u00e9 ignor\u00e9e, 100 %% = note douce -> peu "
+                           "d'enveloppe, note franche -> course pleine."
+                           % self._cc("cc_veldepth"))))
         self._tips.append((275, 684, 1425, 822, "Clavier à la souris : cliquer "
                            "ou glisser sur les touches joue la note (commande N), "
                            "relâcher l'arrête (X). Fonctionne en mode SÉRIE "
@@ -1408,6 +1653,60 @@ class App:
                            "deux niveaux sont mémorisés séparément. La rotation "
                            "de ENC2 choisit l'algorithme (ROOM/HALL/PLATE/"
                            "SPRING) ou la durée (60/120/240/480 ms)."))
+        self._tips.append((525, 848, 665, 894, lambda: (
+                           "LED BRIGHT : luminosité des 3 "
+                           "LEDs physiques des encodeurs (OSC1/2/3) sur "
+                           "l'ESP32. Cliquer ou glisser pour régler (commande "
+                           "série W0-100) ; réglable aussi en MIDI par CC%d "
+                           "depuis le clavier maître. 0 %% = LEDs éteintes."
+                           % self._cc("cc_ledbright"))))
+
+    # ------------------------------------------------------- curseur LED BRIGHT
+    def _led_ui(self, t):
+        """Redessine la barre + la valeur du curseur LED BRIGHT (0..1)."""
+        t = max(0.0, min(1.0, t))
+        self._led_val = t
+        self.cv.coords(self.led_bar, 532, 874, 532 + 128 * t, 876)
+        self.cv.itemconfigure(self.led_bar,
+                              fill="#e8e4dc" if t > 0.004 else "#39414a")
+        self.cv.itemconfigure(self.led_val,
+                              text=f"{t:.0%}",
+                              fill="#d8d8d8" if t > 0.004 else "#5a6470")
+
+    def _in_led_slider(self, x, y):
+        return 528 <= x <= 662 and 856 <= y <= 896
+
+    def _led_from_x(self, x):
+        t = (x - 530) / 130.0
+        return max(0.0, min(1.0, t))
+
+    def _on_led_down(self, event):
+        if not self._in_led_slider(event.x, event.y):
+            return
+        self._led_drag = True
+        self._apply_led(self._led_from_x(event.x))
+
+    def _on_led_drag(self, event):
+        if getattr(self, "_led_drag", False):
+            self._apply_led(self._led_from_x(event.x))
+
+    def _on_led_up(self, event):
+        if getattr(self, "_led_drag", False):
+            self._led_drag = False
+            self._apply_led(self._led_from_x(event.x))
+
+    def _apply_led(self, t):
+        self._led_ui(t)
+        pct = int(round(t * 100))
+        if pct == getattr(self, "_led_sent", -1):
+            return  # n'émet que si le pourcent a réellement changé
+        self._led_sent = pct
+        if self.ser and getattr(self.ser, "is_open", False):
+            try:
+                self.ser.write(("W%d\n" % pct).encode())
+                self.ser.flush()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------- données
     def _update_all(self, d, sw, locks=0):
@@ -1513,6 +1812,10 @@ class App:
                 self.cv.itemconfigure(
                     self.knobs["reverb"].idv["label"],
                     text="DELAY" if actif_dly else "REVERB")
+        # Curseur LED BRIGHT : suit la valeur renvoyée par le firmware (CC14 ou
+        # commande W) sauf pendant qu'on le fait glisser à la souris.
+        if not getattr(self, "_led_drag", False):
+            self._led_ui(max(0.0, min(1.0, d.get("ledbright", 1.0))))
 
     # ------------------------------------------------------------- overload
     def _update_overload(self, d, sw, gate):
@@ -1672,6 +1975,20 @@ class App:
                 delaytype = int(parts[52])
             except (ValueError, IndexError):
                 delaytype = 0
+        ledbright = 1.0
+        if len(parts) > 53:
+            try:
+                ledbright = max(0.0, min(1.0, float(parts[53])))
+            except (ValueError, IndexError):
+                ledbright = 1.0
+        # Table des CC MIDI réellement active dans le firmware (champs 54..58,
+        # optionnels) : sert de référence/affichage dans la boîte CONFIG.
+        cc_fw = None
+        if len(parts) > 58:
+            try:
+                cc_fw = [int(parts[54 + k]) for k in range(5)]
+            except (ValueError, IndexError):
+                cc_fw = None
 
         nums = ["vol1", "vol2", "vol3", "volN", "freq2", "freq3",
                 "cut", "res", "amt", "fAtk", "fDec", "fSus",
@@ -1693,6 +2010,8 @@ class App:
         d["veldepth"] = veldepth
         d["delaylevel"] = delaylevel
         d["delaytype"] = delaytype
+        d["ledbright"] = ledbright
+        d["cc_fw"] = cc_fw
 
         self._last = d.copy()
         self._last["sw"] = sw
@@ -1763,6 +2082,8 @@ class App:
             "veldepth": 0.5 + 0.5 * math.sin(t * 1.3),
             "delaylevel": 0.5 + 0.4 * math.sin(t * 0.6),
             "delaytype": int(t) % 4,
+            "ledbright": 0.55 + 0.45 * math.sin(t * 0.4),
+            "cc_fw": [1, 3, 9, 14, 122],
         }
         sw0 = [0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1]
         self._update_all(d, sw0)
@@ -1835,8 +2156,15 @@ class App:
         if typ == 0xA0:
             return f"Aftertouch ch{ch} · v{d0}"
         if typ == 0xB0:
-            return (f"CC mod ch{ch} · v{d1}" if d0 == 1
-                    else f"CC ch{ch} · n{d0} v{d1}")
+            noms = {self._cc("cc_modwheel"): "molette",
+                    self._cc("cc_moddepth"): "mod depth",
+                    self._cc("cc_veldepth"): "vel filt",
+                    self._cc("cc_ledbright"): "LED bright",
+                    self._cc("cc_patch"): "patch"}
+            nom = noms.get(d0)
+            if nom:
+                return f"CC {nom} ch{ch} · v{d1}"
+            return f"CC ch{ch} · n{d0} v{d1}"
         if typ == 0xC0:
             return f"Program ch{ch} · {d0}"
         if typ == 0xD0:
