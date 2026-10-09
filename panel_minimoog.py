@@ -48,6 +48,12 @@ vérité sur le PC) et poussée au firmware par la commande série
 donc modifiable sans reflash. Le firmware renvoie la table active en fin de
 trame P (champs ccMW/ccMD/ccVD/ccLB/ccPL), affichée dans la boîte CONFIG.
 
+Séquences : le menu DÉMO de la bande du haut propose de courts riffs
+classiques (sequences.json — éditable). Au lancement, le patch le plus adapté
+est choisi automatiquement dans la banque selon le profil du riff, chargé au
+firmware (commande L<nom>) puis joué une fois (commande N n<note>s<durée>,
+arrêt automatique en fin de motif ; STOP envoie A immédiatement).
+
 Usage :
     python3 panel_minimoog.py /dev/ttyUSB0          (port explicite)
     python3 panel_minimoog.py --demo                (données simulées)
@@ -84,16 +90,26 @@ PANEL_BRUSH_LIGHT = ("#1c1e22", "#21242a", "#1a1d21")
 PANEL_BRUSH_DARK = ("#111214", "#131417", "#101113")
 PANEL_GRAIN = ("#20232a", "#0f1012", "#1a1d23")
 SILK = "#c2baa8"          # sérigraphie crème (cadres de section)
+# Décalage vertical du corps du panneau (sous la bande du haut) : libère de la
+# place pour les lignes d'en-tête et la ligne DÉMO. La plaque métallique et le
+# rail en bois suivent ce décalage (voir PANEL_BOX / PANEL_SCREWS et App).
+BODY_DY = 34
+# Marge de bois sous le rail des jauges (MOD DEPTH / VEL FILT / LED BRIGHT)
+# jusqu'au bas de la fenêtre : y loge les vis du bas, près de la bordure.
+BOTTOM_PAD = 40
 # Rectangle de la plaque : 6 px de métal autour des sections, le bas s'arrête
 # au-dessus des jauges MOD DEPTH / VEL FILT qui vivent sur le rail en bois.
-PANEL_BOX = (24, 24, 1476, 849)
+PANEL_BOX = (24, 24, 1476, 849 + BODY_DY)
+# Dimensions de la fenêtre (partagées avec App.W / App.H).
+WIN_W, WIN_H = 1500, 900 + BODY_DY + BOTTOM_PAD
 # Vis du panneau, uniquement dans les marges en bois (aucun widget à ces
-# emplacements : x<24, x>1476, y<24, ou y>849 hors jauges).
+# emplacements : x<24, x>1476, y<24, ou sous la plaque hors jauges). Les vis du
+# bas sont placées juste au-dessus de la bordure inférieure de la fenêtre.
 PANEL_SCREWS = (
-    (13, 200), (13, 470), (13, 740),
-    (1487, 200), (1487, 470), (1487, 740),
+    (13, 200), (13, 470), (13, 740 + BODY_DY),
+    (1487, 200), (1487, 470), (1487, 740 + BODY_DY),
     (330, 13), (750, 13), (1170, 13),
-    (700, 875), (1100, 875), (1400, 875),
+    (330, WIN_H - 14), (750, WIN_H - 14), (1170, WIN_H - 14),
 )
 
 # Échelle appliquée côté firmware à la molette de modulation (CC1 ÷2, cf.
@@ -157,6 +173,115 @@ CC_LABELS = [
     ("cc_ledbright", "LED bright (luminosité)"),
     ("cc_patch", "Chargement de patch"),
 ]
+
+# --- Séquences de démonstration (menu SÉQUENCE de la barre du haut) ----------
+# Chaque séquence est jouée par le firmware (commande 'N n<note>s<durée> …',
+# syntaxe de traiterSequence() dans minimoog.ino) : le firmware le joue en
+# boucle mais la GUI envoie 'A' en fin de passe (lecture unique). Le patch le
+# plus adapté est choisi automatiquement dans la banque selon le profil du riff
+# (voir patch_score/best_patch ci-dessous) ; sequences.json reste éditable.
+SEQUENCES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "sequences.json")
+DEFAULT_SEQUENCES = {
+    "sequences": [
+        {"nom": "I Feel Love (Donna Summer)", "profil": "bass",
+         "notes": [[48, 0.13], [48, 0.13], [48, 0.13], [48, 0.13],
+                   [46, 0.13], [46, 0.13], [46, 0.13], [46, 0.13],
+                   [44, 0.13], [44, 0.13], [44, 0.13], [44, 0.13],
+                   [46, 0.13], [46, 0.13], [46, 0.13], [46, 0.13]]},
+        {"nom": "Thriller (Michael Jackson)", "profil": "bass",
+         "notes": [[54, 0.18], [54, 0.18], [54, 0.18],
+                   [52, 0.18], [52, 0.18], [52, 0.18],
+                   [50, 0.18], [50, 0.18], [50, 0.18],
+                   [49, 0.18], [49, 0.18], [49, 0.18]]},
+        {"nom": "The Chain (Fleetwood Mac)", "profil": "bass",
+         "notes": [[40, 0.22], [40, 0.22], [40, 0.22], [40, 0.22],
+                   [43, 0.22], [43, 0.22], [45, 0.22], [45, 0.22],
+                   [43, 0.22], [43, 0.22], [40, 0.22], [40, 0.22]]},
+        {"nom": "Chariots of Fire (Vangelis)", "profil": "strings",
+         "notes": [[62, 0.35], [64, 0.35], [66, 0.35], [69, 0.7],
+                   [66, 0.35], [64, 0.35], [62, 0.7]]},
+        {"nom": "Frankenstein (Edgar Winter)", "profil": "lead",
+         "notes": [[69, 0.12], [67, 0.12], [65, 0.12], [64, 0.12],
+                   [62, 0.12], [60, 0.12], [62, 0.12], [64, 0.12],
+                   [65, 0.12], [67, 0.12]]},
+        {"nom": "Flash Gordon (Vangelis)", "profil": "brass",
+         "notes": [[62, 0.18], [62, 0.18], [65, 0.18], [67, 0.36],
+                   [62, 0.18], [65, 0.18], [67, 0.18], [70, 0.7]]},
+        {"nom": "Autobahn (Kraftwerk)", "profil": "lead",
+         "notes": [[67, 0.25], [67, 0.25], [69, 0.25], [67, 0.25],
+                   [65, 0.25], [64, 0.25], [65, 0.25], [64, 0.25]]},
+        {"nom": "Lucky Man (ELP)", "profil": "lead",
+         "notes": [[62, 0.2], [64, 0.2], [66, 0.2], [67, 0.2], [69, 0.2],
+                   [71, 0.2], [74, 0.5], [71, 0.2], [69, 0.2], [67, 0.2],
+                   [66, 0.5]]},
+    ]
+}
+
+# Profils de sélection automatique du patch : pour chaque profil, une cible
+# (feature -> valeur visée) et son poids. Le score d'un patch = somme(poids ×
+# proximité) ; la proximité vaut 1 quand le patch colle à la cible et décroît
+# avec l'écart. Purement paramétrique : s'adapte à n'importe quelle banque.
+_ENV_SCALE = 1.5     # normalisation des temps d'enveloppe (latk/fatk/ldec)
+_RANGE_SCALE = 2.5   # normalisation des octaves (lo/hi/rm)
+_PATCH_PROFILES = {
+    "bass": ({"lo": 1.0, "rm": 1.6, "latk": 0.02, "lsus": 0.5,
+              "cut": 0.35, "glide": 0.15},
+             {"lo": 2, "rm": 1, "latk": 2, "lsus": 1, "cut": 1, "glide": 1}),
+    "lead": ({"lo": 3.0, "rm": 3.0, "latk": 0.06, "glide": 0.3,
+              "cut": 0.45, "res": 0.45},
+             {"lo": 1, "rm": 1, "latk": 2, "glide": 2, "cut": 1, "res": 1}),
+    "pad": ({"latk": 0.5, "fatk": 0.55, "lsus": 0.85, "rm": 3.2, "saw": 0.0},
+            {"latk": 3, "fatk": 2, "lsus": 2, "rm": 1, "saw": 0.5}),
+    "strings": ({"latk": 0.8, "fatk": 0.7, "lsus": 0.9, "saw": 1.0},
+                {"latk": 3, "fatk": 2, "lsus": 2, "saw": 1}),
+    "brass": ({"fatk": 0.18, "amt": 0.8, "cut": 0.42, "lsus": 0.75,
+               "saw": 1.0, "rm": 3.2},
+              {"fatk": 2, "amt": 2, "cut": 1, "lsus": 1, "saw": 1, "rm": 1}),
+    "pluck": ({"latk": 0.01, "lsus": 0.2, "ldec": 0.15, "cut": 0.55},
+              {"latk": 3, "lsus": 2, "ldec": 2, "cut": 1}),
+    "whistle": ({"hi": 6, "res": 1.0, "glide": 0.4, "cut": 0.35},
+                {"hi": 2, "res": 2, "glide": 1, "cut": 1}),
+}
+
+
+def patch_features(p):
+    """Vecteur de caractéristiques normalisées d'un patch de la banque."""
+    r = p.get("r") or [3, 3, 3]
+    w = p.get("w") or [2, 2, 2]
+    return {
+        "lo": min(r), "hi": max(r), "rm": sum(r) / max(1, len(r)),
+        "latk": p.get("lAtk", 0.0), "fatk": p.get("fAtk", 0.0),
+        "lsus": p.get("lSus", 1.0), "ldec": p.get("lDec", 0.0),
+        "cut": p.get("cut", 0.0), "res": p.get("res", 0.0),
+        "amt": p.get("amt", 0.0), "glide": p.get("glide", 0.0),
+        "saw": 1.0 if 2 in w else 0.0,
+    }
+
+
+def patch_score(patch, profil):
+    """Score d'adéquation d'un patch à un profil (plus grand = plus adapté)."""
+    cible = _PATCH_PROFILES.get(profil)
+    if not cible or patch is None:
+        return 0.0
+    tgt, poids = cible
+    fe = patch_features(patch)
+    score = 0.0
+    for k, t in tgt.items():
+        ech = _ENV_SCALE if k in ("latk", "fatk", "ldec") else _RANGE_SCALE
+        score += poids[k] * (1.0 - min(1.0, abs(fe[k] - t) / ech))
+    return score
+
+
+def best_patch(patches, profil):
+    """Patch le plus adapté à un profil dans la banque (None si banque vide)."""
+    best, best_s = None, None
+    for p in patches:
+        s = patch_score(p, profil)
+        if best_s is None or s > best_s:
+            best, best_s = p, s
+    return best
+
 
 # Inverse du mapping firmware des temps d'enveloppe (0.01 s * 1000^rotation) :
 # transforme une durée en secondes -> fraction de rotation 0..1 de l'aiguille.
@@ -391,6 +516,8 @@ class SwitchOn:
         self.orient = orient
         self.idv = {}
         self.blink = False
+        self.on = False
+        self._phase = True
         self._draw()
 
     def _draw(self):
@@ -409,7 +536,8 @@ class SwitchOn:
     def update(self, raw, locked=False):
         self.blink = (raw >= 2)
         on = bool(raw)
-        self._set(on)
+        self.on = on
+        self._set(self._phase if self.blink else on)
         if self.states:
             txt = self.blink_txt if self.blink else (self.states[1] if on else self.states[0])
         else:
@@ -425,7 +553,9 @@ class SwitchOn:
         pass
 
     def blink_tick(self, phase_on):
-        pass
+        self._phase = phase_on
+        if self.blink:
+            self._set(phase_on)
 
 
 class Wheel:
@@ -475,7 +605,7 @@ class Wheel:
             cv.create_line(x + self.INNER, ty, x + self.OUTER - 1, ty,
                            fill=col, width=lw)
         # 3) étiquette teintée à la couleur de la molette
-        cv.create_text(x, y - 12, text=label, font=("Helvetica", 9, "bold"),
+        cv.create_text(x, y - 11, text=label, font=("Helvetica", 9, "bold"),
                        fill=color)
         # 4) capuchon mobile : corps, face, nervures puis index coloré
         self._top0 = y + pad + (h - self.TH - 2 * pad)   # position pour lo
@@ -643,7 +773,8 @@ class Keyboard:
 
 
 class App:
-    W, H = 1500, 900
+    W, H = WIN_W, WIN_H
+    BODY_DY = BODY_DY  # voir la constante module (partagée avec PANEL_BOX)
 
     # Référence du panneau réel :
     # SWITCHES (idx trame 18..30) :
@@ -680,6 +811,9 @@ class App:
         self._bank_sync = -1
         self.patches = self._load_patches()
         self.config = self._load_config()
+        self.sequences = self._load_sequences()
+        self._seq_playing = False
+        self._seq_after = None
         self._tips = []
         self._tip_last = None
         self.tt = ToolTip()
@@ -689,17 +823,30 @@ class App:
         self._ovl_t = time.time()
         self._ovl_lit_until = 0.0    # maintien visuel de la LED OVERLOAD
         self._led_drag = False       # curseur LED BRIGHT en cours de glissé ?
-        self._led_val = 1.0          # dernière luminosité LEDs (0..1)
+        self._led_val = 0.5          # dernière luminosité LEDs (0..1)
         self._led_sent = -1          # dernier pourcent W envoyé au firmware
+        self._mod_drag = False       # jauge MOD DEPTH en cours de glissé ?
+        self._mod_val = 0.5          # atténuateur MOD DEPTH courant (0..1)
+        self._vel_drag = False       # jauge VEL FILT en cours de glissé ?
+        self._vel_val = 0.5          # atténuateur VEL FILT courant (0..1)
+        self._depth_sent = (-1, -1)  # dernier couple (mod,vel) % envoyé (cmd D)
         self._build_panel()
         self._build_patch_widgets()
+        self._build_sequence_widgets()
         self.cv.bind("<Enter>", self._tip_motion)
         self.cv.bind("<Motion>", self._tip_motion)
         self.cv.bind("<Leave>", lambda e: self._tip_clear())
-        # Curseur LED BRIGHT : bindings additifs (le clavier garde les siens).
+        # Jauges (LED BRIGHT, MOD DEPTH, VEL FILT) : bindings additifs
+        # (le clavier virtuel garde les siens).
         self.cv.bind("<ButtonPress-1>", self._on_led_down, add="+")
         self.cv.bind("<B1-Motion>", self._on_led_drag, add="+")
         self.cv.bind("<ButtonRelease-1>", self._on_led_up, add="+")
+        self.cv.bind("<ButtonPress-1>", self._on_mod_down, add="+")
+        self.cv.bind("<B1-Motion>", self._on_mod_drag, add="+")
+        self.cv.bind("<ButtonRelease-1>", self._on_mod_up, add="+")
+        self.cv.bind("<ButtonPress-1>", self._on_vel_down, add="+")
+        self.cv.bind("<B1-Motion>", self._on_vel_drag, add="+")
+        self.cv.bind("<ButtonRelease-1>", self._on_vel_up, add="+")
 
         if serial and not demo and self.port:
             try:
@@ -732,11 +879,12 @@ class App:
         self.root.mainloop()
 
     # ------------------------------------------------------------- structure
-    def _box(self, x, y, w, h, title=None):
+    def _box(self, x, y, w, h, title=None, dy=0):
         # Sérigraphie crème façon Model D : simple cadre imprimé SUR la
         # plaque, sans remplissage — la texture du métal brossé (peinte par
         # _paint_background) reste visible dessous, comme sur le vrai panneau.
         cv = self.cv
+        y = y + dy
         cv.create_rectangle(x - 1, y - 1, x + w + 1, y + h + 1,
                             outline=PANEL_EDGE, width=1)
         cv.create_rectangle(x, y, x + w, y + h, outline=SILK, width=1)
@@ -747,6 +895,7 @@ class App:
 
     def knob(self, key, x, y, label, lo=0.0, hi=1.0, fmt="{:.2f}", wave=None,
              norm=None, help=None, accent=None):
+        y = y + self.BODY_DY
         self.knobs[key] = Knob(self.cv, x, y, label, lo=lo, hi=hi, fmt=fmt,
                                wave=wave, norm=norm, accent=accent)
         if help:
@@ -754,6 +903,7 @@ class App:
 
     def switch(self, key, x, y, label, states=None, blink_txt="PATCH",
                help=None, color=MD_WHITE, orient="h"):
+        y = y + self.BODY_DY
         self.switches[key] = SwitchOn(self.cv, x, y, label, states=states,
                                       blink_txt=blink_txt, color=color,
                                       orient=orient)
@@ -1089,7 +1239,11 @@ class App:
 
     def _delete_patch(self):
         """Supprime le patch actif (sélection du combo) après confirmation."""
-        sel = self.patch_combo.current()
+        try:
+            sel = [p.get("nom", "?") for p in self.patches].index(
+                self.patch_var.get())
+        except ValueError:
+            sel = -1
         if sel < 0 or sel >= len(self.patches):
             return
         p = self.patches[sel]
@@ -1116,6 +1270,7 @@ class App:
         if not (self.ser and self.ser.is_open):
             print("[GUI] Reset : port série fermé")
             return
+        self._seq_ui_idle()
         if getattr(self, "_midi_estActive", False):
             self._auto_serial_recovery()
             return
@@ -1163,22 +1318,25 @@ class App:
     def _refresh_patch_list(self):
         try:
             names = [p.get("nom", f"PATCH{i+1}") for i, p in enumerate(self.patches)]
-            self.patch_combo["values"] = names
+            menu = self.patch_combo["menu"]
+            menu.delete(0, "end")
+            for n in names:
+                menu.add_command(label=n,
+                                 command=lambda v=n: self.patch_var.set(v))
             if names:
-                self.patch_combo.current(0)
+                self.patch_var.set(names[0])
         except Exception:
             pass
 
     def _build_patch_widgets(self):
-        try:
-            from tkinter import ttk
-        except ImportError:
-            ttk = None
-        if ttk is None:
-            return
-        self.patch_combo = ttk.Combobox(
-            self.root, state="readonly", width=12, font=("Helvetica", 9),
-            values=[p.get("nom", "?") for p in self.patches])
+        names = [p.get("nom", "?") for p in self.patches] or ["—"]
+        self.patch_var = tk.StringVar(value=names[0])
+        self.patch_combo = tk.OptionMenu(self.root, self.patch_var, *names)
+        self.patch_combo.configure(font=("Helvetica", 9), bg="#2a2f36",
+                                   fg="#ffffff", activebackground="#3a4048",
+                                   activeforeground="#ffffff", bd=1,
+                                   highlightthickness=0, width=12)
+        self.patch_combo["menu"].configure(font=("Helvetica", 9))
         # Pas de chargement au clic : la liste est un simple sélecteur pour
         # SAVE/DELETE, le rappel se fait par ENC1 (mode patch) sur le synthé.
         self.cv.create_window(865, 72, window=self.patch_combo, anchor="center")
@@ -1218,6 +1376,159 @@ class App:
                       "sortie du mode patch). En mode MIDI (RX coupée) : reset "
                       "matériel de l'ESP puis re-push de la banque (repassage "
                       "en série).")
+
+    # ----------------------------------------------------------- séquences
+    def _load_sequences(self):
+        """Charge sequences.json (créé avec les riffs par défaut si absent)."""
+        if not os.path.exists(SEQUENCES_FILE):
+            try:
+                with open(SEQUENCES_FILE, "w", encoding="utf-8") as f:
+                    json.dump(DEFAULT_SEQUENCES, f, ensure_ascii=False,
+                              indent=2)
+            except Exception:
+                pass
+        try:
+            with open(SEQUENCES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            seqs = data.get("sequences")
+            if isinstance(seqs, list) and seqs:
+                return seqs
+        except Exception:
+            pass
+        return [dict(s) for s in DEFAULT_SEQUENCES["sequences"]]
+
+    def _build_sequence_widgets(self):
+        """Menu DÉMO (bande du haut) : sélectionne un riff, charge le patch
+        le plus adapté de la banque puis lance la séquence dans le firmware."""
+        cv = self.cv
+        cv.create_text(330, 130, text="Démo", anchor="w",
+                       font=("Helvetica", 9, "bold"), fill="#ffd24a")
+        names = [s.get("nom", f"SEQ{i + 1}")
+                 for i, s in enumerate(self.sequences)] or ["—"]
+        self.seq_var = tk.StringVar(value=names[0])
+        self.seq_menu = tk.OptionMenu(self.root, self.seq_var, *names)
+        self.seq_menu.configure(font=("Helvetica", 9), bg="#2a2f36",
+                                fg="#ffffff", activebackground="#3a4048",
+                                activeforeground="#ffffff", bd=1,
+                                highlightthickness=0, width=40)
+        self.seq_menu["menu"].configure(font=("Helvetica", 9))
+        cv.create_window(560, 130, window=self.seq_menu, anchor="center")
+        self.seq_btn = tk.Button(
+            self.root, text="▶ JOUER", font=("Helvetica", 9, "bold"),
+            bg="#00838f", fg="#ffffff", activebackground="#00acc1",
+            activeforeground="#ffffff", relief="raised", bd=2,
+            padx=8, pady=1, cursor="hand2", command=self._toggle_sequence)
+        cv.create_window(800, 130, window=self.seq_btn, anchor="center")
+        self.top["seqpatch"] = cv.create_text(
+            855, 130, text="", anchor="w", font=("Helvetica", 8, "bold"),
+            fill="#7cd4ff")
+        self._btn_tip(self.seq_menu, "DÉMO : courts riffs classiques du "
+                      "Minimoog (sequences.json — éditable). Le patch est "
+                      "choisi automatiquement selon le profil du riff.")
+        self._btn_tip(self.seq_btn, "JOUER/STOP : charge le patch le plus "
+                      "adapté de la banque (sélection par profil), puis joue "
+                      "le riff UNE fois (arrêt automatique en fin de motif). "
+                      "Recliquer interrompt tout de suite (commande A).")
+
+    def _sequence_line(self, seq):
+        """Construit la ligne série 'N n<note>s<durée> …' d'une séquence."""
+        toks = []
+        for item in seq.get("notes", []):
+            try:
+                n, d = int(item[0]), float(item[1])
+            except Exception:
+                continue
+            if 0 <= n <= 127 and d > 0:
+                toks.append("n%ds%g" % (n, d))
+        return ("N " + " ".join(toks)) if toks else None
+
+    def _sequence_ms(self, seq):
+        """Durée d'une passe, calquée sur tacheSequence() : chaque note dure
+        ceil(d*1000/20)*20 ms, plus 30 ms de blanc entre les notes."""
+        total = 0
+        for item in seq.get("notes", []):
+            try:
+                d = float(item[1])
+            except Exception:
+                continue
+            if d <= 0:
+                continue
+            dur = int(d * 1000)               # troncature, comme le firmware
+            total += ((dur + 19) // 20) * 20 + 30
+        return total
+
+    def _toggle_sequence(self):
+        if getattr(self, "_seq_playing", False):
+            self._stop_sequence()
+        else:
+            self._play_sequence()
+
+    def _play_sequence(self):
+        """Charge le patch le plus adapté à la séquence, puis la joue une fois."""
+        if self.demo or getattr(self, "_midi_estActive", False):
+            return
+        if not (self.ser and getattr(self.ser, "is_open", False)):
+            return
+        nom = self.seq_var.get()
+        seq = next((s for s in self.sequences if s.get("nom") == nom), None)
+        if seq is None:
+            return
+        line = self._sequence_line(seq)
+        if line is None:
+            return
+        profil = seq.get("profil", "")
+        patch = best_patch(self.patches, profil)
+        pnom = patch.get("nom") if patch else None
+        try:
+            if pnom:
+                self.ser.write(("L %s\n" % pnom).encode())
+            self.ser.write((line + "\n").encode())
+            self.ser.flush()
+        except Exception:
+            return
+        self._seq_playing = True
+        self.seq_btn.configure(text="■ STOP", bg="#c0392b",
+                               activebackground="#ff6b5e")
+        if pnom:
+            self.cv.itemconfigure(self.top["patch"], text=f"Patch: {pnom}")
+            self.cv.itemconfigure(
+                self.top["seqpatch"], text="→ %s (%s)" % (pnom, profil))
+        # Arrêt automatique : une passe exactement. Le firmware a jusqu'à 50 ms
+        # de latence de démarrage, donc on borne à la durée du motif : le
+        # deuxième passage n'est jamais entamé (la dernière note peut être
+        # tronquée de quelques ms selon la latence).
+        if self._seq_after is not None:
+            try:
+                self.root.after_cancel(self._seq_after)
+            except Exception:
+                pass
+        self._seq_after = self.root.after(
+            max(200, self._sequence_ms(seq)), self._stop_sequence)
+
+    def _stop_sequence(self):
+        self._seq_ui_idle()
+        try:
+            if self.ser and getattr(self.ser, "is_open", False):
+                self.ser.write(b"A\n")
+                self.ser.flush()
+        except Exception:
+            pass
+
+    def _seq_ui_idle(self):
+        """Remet le bouton SÉQUENCE à l'arrêt et annule l'arrêt programmé."""
+        self._seq_playing = False
+        if getattr(self, "_seq_after", None) is not None:
+            try:
+                self.root.after_cancel(self._seq_after)
+            except Exception:
+                pass
+            self._seq_after = None
+        try:
+            self.seq_btn.configure(text="▶ JOUER", bg="#00838f",
+                                   activebackground="#00acc1")
+            self.cv.itemconfigure(self.top["seqpatch"], text="")
+        except Exception:
+            pass
 
     def _paint_background(self):
         """Fond façon Model D : cabinet en noyer dans les marges, plaque
@@ -1291,12 +1602,13 @@ class App:
         self._paint_background()
         cv = self.cv
         self._box(30, 30, 1440, 76, "MINIMOOG MODEL D — état temps réel")
-        self._box(30, 120, 310, 520, "MOD / GLIDE / OUT")
-        self._box(365, 120, 420, 520, "OSCILLATOR BANK")
-        self._box(805, 120, 310, 520, "MIXER")
-        self._box(1135, 120, 335, 300, "FILTER")
-        self._box(1135, 440, 335, 200, "LOUDNESS")
-        self._box(30, 660, 1440, 185)
+        dy = self.BODY_DY
+        self._box(30, 120, 310, 520, "MOD / GLIDE / OUT", dy=dy)
+        self._box(365, 120, 420, 520, "OSCILLATOR BANK", dy=dy)
+        self._box(805, 120, 310, 520, "MIXER", dy=dy)
+        self._box(1135, 120, 335, 300, "FILTER", dy=dy)
+        self._box(1135, 440, 335, 200, "LOUDNESS", dy=dy)
+        self._box(30, 660, 1440, 185, dy=dy)
 
         self.top["port"] = cv.create_text(
             45, 72, text=f"Port: {self.port or '—'}", anchor="w",
@@ -1367,7 +1679,7 @@ class App:
             bg="#4527a0", fg="#ffffff", activebackground="#5e35b1",
             activeforeground="#ffffff", relief="raised", bd=2,
             padx=8, pady=1, cursor="hand2", command=self._open_config)
-        cv.create_window(150, 91, window=self.cfg_btn, anchor="center")
+        cv.create_window(150, 130, window=self.cfg_btn, anchor="center")
         self._btn_tip(self.cfg_btn, "CONFIG : correspondance des CC MIDI "
                       "(molette, mod depth, vel filt, LED bright, chargement de "
                       "patch). Enregistrée dans config.json et poussée au "
@@ -1412,25 +1724,27 @@ class App:
         # Indicateur reverb façon écran 80s : valeur en % (ambre), LED de
         # service, label en dessous.
         self.top["revPanel"] = cv.create_rectangle(
-            193, 540, 277, 580, fill="#0e1116", outline="#4a525b", width=2)
-        cv.create_rectangle(199, 546, 271, 574, outline="#1c262f", width=1)
+            193, 540 + dy, 277, 580 + dy, fill="#0e1116", outline="#4a525b",
+            width=2)
+        cv.create_rectangle(199, 546 + dy, 271, 574 + dy, outline="#1c262f",
+                            width=1)
         self.top["revLed"] = cv.create_oval(
-            202, 556, 212, 566, fill="#3a4048", outline="#1a2b33")
+            202, 556 + dy, 212, 566 + dy, fill="#3a4048", outline="#1a2b33")
         self.top["revValue"] = cv.create_text(
-            235, 564, text="00%", font=("Courier", 16, "bold"),
+            235, 564 + dy, text="00%", font=("Courier", 16, "bold"),
             fill="#ffb14a")
         self.top["revGlow"] = []
-        for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+        for gx, gy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
             self.top["revGlow"].append(cv.create_text(
-                235 + dx, 564 + dy, text="00%",
+                235 + gx, 564 + dy + gy, text="00%",
                 font=("Courier", 16, "bold"), fill="#5a2a00"))
         self.top["revUnit"] = cv.create_text(
-            258, 549, text="REV", font=("Helvetica", 7), fill="#7a828b")
+            258, 549 + dy, text="REV", font=("Helvetica", 7), fill="#7a828b")
         self.top["rev"] = cv.create_text(
-            235, 592, text="REVERB off", font=("Helvetica", 8, "bold"),
+            235, 592 + dy, text="REVERB off", font=("Helvetica", 8, "bold"),
             fill="#3a4048")
         self.top["revType"] = cv.create_text(
-            235, 606, text="", font=("Courier", 8, "bold"),
+            235, 606 + dy, text="", font=("Courier", 8, "bold"),
             fill="#7cd4ff")
 
         # --- Mixer (x 805..1115) : 3 vol + noise + EXT, switchs on/off,
@@ -1471,14 +1785,15 @@ class App:
         # LED OVERLOAD (GUI seulement) : à droite du potar EXT VOL, rouge quand
         # le mixer sature (estimation — voir _update_overload).
         self.top["ovlGlow"] = cv.create_oval(
-            1093 - 8, 570 - 8, 1093 + 8, 570 + 8, fill="", outline="")
+            1093 - 8, 570 + dy - 8, 1093 + 8, 570 + dy + 8, fill="",
+            outline="")
         self.top["ovlLed"] = cv.create_oval(
-            1093 - 5, 570 - 5, 1093 + 5, 570 + 5,
+            1093 - 5, 570 + dy - 5, 1093 + 5, 570 + dy + 5,
             fill="#3a2020", outline="#1a0d0d", width=1)
         self.top["ovlTxt"] = cv.create_text(
-            1093, 588, text="OVLD", font=("Helvetica", 7, "bold"),
+            1093, 588 + dy, text="OVLD", font=("Helvetica", 7, "bold"),
             fill="#7a828b")
-        self._tips.append((1063, 544, 1120, 598,
+        self._tips.append((1063, 544 + dy, 1120, 598 + dy,
                            "OVERLOAD : lampe de saturation de sortie (façon "
                            "Model D). La GUI ne reçoit pas l'audio : elle "
                            "estime le niveau par la somme des sources actives "
@@ -1533,7 +1848,7 @@ class App:
         rows = [(210, False), (330, True), (450, True)]
         for i, (y, has_det) in enumerate(rows):
             self.top[f"vco{i}"] = cv.create_text(
-                405, y, text=f"VCO {i+1}", font=("Helvetica", 10, "bold"),
+                405, y + dy, text=f"VCO {i+1}", font=("Helvetica", 10, "bold"),
                 fill="#d8d8d8")
             push_help = ("rappelle un patch de la banque (mode PATCH, "
                          "LED clignote)."
@@ -1581,79 +1896,85 @@ class App:
 
         # --- Clavier (x 30..1470) — molettes pitch/mod à gauche,
         # 49 notes, la touche jouée s'enfonce
-        self.pitchw = Wheel(self.cv, 140, 682, 52, 136, "PITCH",
+        self.pitchw = Wheel(self.cv, 140, 682 + dy, 52, 136, "PITCH",
                             lo=-2.0, hi=2.0, color="#ffd24a",
                             fmt="{:+.1f} st", detent=True)
-        self.modw = Wheel(self.cv, 205, 682, 52, 136, "MOD",
+        self.modw = Wheel(self.cv, 205, 682 + dy, 52, 136, "MOD",
                           lo=0.0, hi=1.0, color="#7cd4ff", fmt="{:.0%}")
         # Atténuateur de modulation = pot "Mod Depth" du Model D (CC3, knob K1
         # du MPK249) : il borne la profondeur MAX de la molette. Jauge compacte
         # sous la molette MOD (elle n'a pas de pot physique sur le panneau).
-        self.cv.create_text(205, 862, text="MOD DEPTH",
+        self.cv.create_text(205, 862 + dy, text="MOD DEPTH",
                             font=("Helvetica", 8), fill="#8b939c")
-        self.cv.create_rectangle(140, 872, 270, 878, fill="#1b1f25",
+        self.cv.create_rectangle(140, 872 + dy, 270, 878 + dy, fill="#1b1f25",
                                  outline="#2f353c")
-        self.moddep_bar = self.cv.create_rectangle(142, 874, 142, 876,
+        self.moddep_bar = self.cv.create_rectangle(142, 874 + dy, 142, 876 + dy,
                                                    fill="#7cd4ff", outline="")
-        self.moddep_val = self.cv.create_text(205, 890, text="",
-                                              font=("Helvetica", 8, "bold"),
-                                              fill="#d8d8d8")
+        self.moddep_val = self.cv.create_text(205, 890 + dy, text="",
+                                               font=("Helvetica", 8, "bold"),
+                                               fill="#d8d8d8")
         # Atténuateur vélocité -> CONTOUR (CC9, knob du MPK249) : même
         # principe que MOD DEPTH. 0 % = la vélocité est ignorée, 100 % = une
         # note douce n'ouvre presque pas l'enveloppe de coupure.
-        self.cv.create_text(400, 862, text="VEL FILT",
+        self.cv.create_text(400, 862 + dy, text="VEL FILT",
                             font=("Helvetica", 8), fill="#8b939c")
-        self.cv.create_rectangle(335, 872, 465, 878, fill="#1b1f25",
+        self.cv.create_rectangle(335, 872 + dy, 465, 878 + dy, fill="#1b1f25",
                                  outline="#2f353c")
-        self.velf_bar = self.cv.create_rectangle(337, 874, 337, 876,
-                                                 fill="#ffb14a", outline="")
-        self.velf_val = self.cv.create_text(400, 890, text="",
+        self.velf_bar = self.cv.create_rectangle(337, 874 + dy, 337, 876 + dy,
+                                                 fill="#7cd4ff", outline="")
+        self.velf_val = self.cv.create_text(400, 890 + dy, text="",
                                             font=("Helvetica", 8, "bold"),
                                             fill="#d8d8d8")
         # Luminosité des 3 LEDs physiques d'encodeur (OSC1/2/3) : curseur
         # horizontal cliquable/glissable. Envoie la commande série W<0-100>
         # au firmware (PWM LEDC) ; réglable aussi au clavier maître via CC14
         # (la position est alors renvoyée par la trame P).
-        self.cv.create_text(595, 862, text="LED BRIGHT",
+        self.cv.create_text(595, 862 + dy, text="LED BRIGHT",
                             font=("Helvetica", 8), fill="#8b939c")
-        self.cv.create_rectangle(530, 872, 660, 878, fill="#1b1f25",
+        self.cv.create_rectangle(530, 872 + dy, 660, 878 + dy, fill="#1b1f25",
                                  outline="#2f353c")
-        self.led_bar = self.cv.create_rectangle(532, 874, 532, 876,
+        self.led_bar = self.cv.create_rectangle(532, 874 + dy, 532, 876 + dy,
                                                 fill="#e8e4dc", outline="")
-        self.led_val = self.cv.create_text(595, 890, text="",
+        self.led_val = self.cv.create_text(595, 890 + dy, text="",
                                            font=("Helvetica", 8, "bold"),
                                            fill="#d8d8d8")
-        self.kbd = Keyboard(self.cv, 275, 695, 1150, 120, midi0=36, midi1=84,
-                            note_cb=self._play_key)
+        self.kbd = Keyboard(self.cv, 275, 695 + dy, 1150, 120, midi0=36,
+                            midi1=84, note_cb=self._play_key)
         self.pitchw.update(0.0)
         self.modw.update(0.05)
         self._led_ui(self._led_val)
+        self._mod_ui(self._mod_val)
+        self._vel_ui(self._vel_val)
 
         # --- Bulles d'aide des zones dessinées (wheels, clavier, reverb)
-        self._tips.append((110, 668, 170, 846, "PITCH (lecture) : pitch bend "
-                           "±7 demi-tons venant du clavier maître (MIDI)."))
-        self._tips.append((175, 668, 235, 846, lambda: (
+        self._tips.append((110, 668 + dy, 170, 846 + dy,
+                           "PITCH (lecture) : pitch bend ±7 demi-tons venant "
+                           "du clavier maître (MIDI)."))
+        self._tips.append((175, 668 + dy, 235, 846 + dy, lambda: (
                            "MOD : position de la molette de modulation (CC%d) "
                            "du clavier maître — vibrato par le VCO3/LFO et "
                            "ouverture du filtre. 100 %% = pleine course de la "
                            "molette." % self._cc("cc_modwheel"))))
-        self._tips.append((335, 850, 465, 890, lambda: (
+        self._tips.append((138, 848 + dy, 272, 900 + dy, lambda: (
+                           "MOD DEPTH (CC%d) : atténuateur de la molette de "
+                           "modulation — borne la profondeur max (vibrato et "
+                           "filtre). Cliquer ou glisser pour régler (commande D)."
+                           % self._cc("cc_moddepth"))))
+        self._tips.append((335, 848 + dy, 467, 900 + dy, lambda: (
                            "VEL FILT (CC%d) : att\u00e9nuateur "
                            "de la v\u00e9locit\u00e9 sur le CONTOUR du filtre. 0 %% = "
                            "v\u00e9locit\u00e9 ignor\u00e9e, 100 %% = note douce -> peu "
-                           "d'enveloppe, note franche -> course pleine."
+                           "d'enveloppe, note franche -> course pleine. Cliquer "
+                           "ou glisser pour régler (commande D)."
                            % self._cc("cc_veldepth"))))
-        self._tips.append((275, 684, 1425, 822, "Clavier à la souris : cliquer "
-                           "ou glisser sur les touches joue la note (commande N), "
-                           "relâcher l'arrête (X). Fonctionne en mode SÉRIE "
-                           "seulement ; en MIDI (RX coupée) il reste visuel."))
-        self._tips.append((190, 535, 280, 614, "EFFETS : niveau par le pot J50 "
+        self._tips.append((190, 535 + dy, 280, 614 + dy,
+                           "EFFETS : niveau par le pot J50 "
                            "partagé (juste au-dessus) — REVERB en mode 2 de "
                            "ENC2, DELAY en mode 3 (la LED VCO2 clignote). Les "
                            "deux niveaux sont mémorisés séparément. La rotation "
                            "de ENC2 choisit l'algorithme (ROOM/HALL/PLATE/"
                            "SPRING) ou la durée (60/120/240/480 ms)."))
-        self._tips.append((525, 848, 665, 894, lambda: (
+        self._tips.append((525, 848 + dy, 665, 894 + dy, lambda: (
                            "LED BRIGHT : luminosité des 3 "
                            "LEDs physiques des encodeurs (OSC1/2/3) sur "
                            "l'ESP32. Cliquer ou glisser pour régler (commande "
@@ -1666,7 +1987,8 @@ class App:
         """Redessine la barre + la valeur du curseur LED BRIGHT (0..1)."""
         t = max(0.0, min(1.0, t))
         self._led_val = t
-        self.cv.coords(self.led_bar, 532, 874, 532 + 128 * t, 876)
+        self.cv.coords(self.led_bar, 532, 874 + self.BODY_DY,
+                       532 + 128 * t, 876 + self.BODY_DY)
         self.cv.itemconfigure(self.led_bar,
                               fill="#e8e4dc" if t > 0.004 else "#39414a")
         self.cv.itemconfigure(self.led_val,
@@ -1674,7 +1996,7 @@ class App:
                               fill="#d8d8d8" if t > 0.004 else "#5a6470")
 
     def _in_led_slider(self, x, y):
-        return 528 <= x <= 662 and 856 <= y <= 896
+        return 528 <= x <= 662 and 856 + self.BODY_DY <= y <= 896 + self.BODY_DY
 
     def _led_from_x(self, x):
         t = (x - 530) / 130.0
@@ -1704,6 +2026,97 @@ class App:
         if self.ser and getattr(self.ser, "is_open", False):
             try:
                 self.ser.write(("W%d\n" % pct).encode())
+                self.ser.flush()
+            except Exception:
+                pass
+
+    # ------------------------------------------- curseurs MOD DEPTH / VEL FILT
+    def _mod_ui(self, t):
+        """Redessine la jauge MOD DEPTH (0..1), teinte cyan."""
+        t = max(0.0, min(1.0, t))
+        self._mod_val = t
+        self.cv.coords(self.moddep_bar, 142, 874 + self.BODY_DY,
+                       142 + 126 * t if t > 0.004 else 142.5,
+                       876 + self.BODY_DY)
+        self.cv.itemconfigure(self.moddep_bar,
+                              fill="#7cd4ff" if t > 0.004 else "#39414a")
+        self.cv.itemconfigure(self.moddep_val,
+                              text=f"{t:.0%}",
+                              fill="#d8d8d8" if t > 0.004 else "#5a6470")
+
+    def _vel_ui(self, t):
+        """Redessine la jauge VEL FILT (0..1), teinte ambre."""
+        t = max(0.0, min(1.0, t))
+        self._vel_val = t
+        self.cv.coords(self.velf_bar, 337, 874 + self.BODY_DY,
+                       337 + 126 * t if t > 0.004 else 337.5,
+                       876 + self.BODY_DY)
+        self.cv.itemconfigure(self.velf_bar,
+                              fill="#ffb14a" if t > 0.004 else "#39414a")
+        self.cv.itemconfigure(self.velf_val,
+                              text=f"{t:.0%}",
+                              fill="#d8d8d8" if t > 0.004 else "#5a6470")
+
+    def _in_mod_slider(self, x, y):
+        return 138 <= x <= 272 and 856 + self.BODY_DY <= y <= 896 + self.BODY_DY
+
+    def _mod_from_x(self, x):
+        return max(0.0, min(1.0, (x - 140) / 130.0))
+
+    def _in_vel_slider(self, x, y):
+        return 333 <= x <= 467 and 856 + self.BODY_DY <= y <= 896 + self.BODY_DY
+
+    def _vel_from_x(self, x):
+        return max(0.0, min(1.0, (x - 335) / 130.0))
+
+    def _on_mod_down(self, event):
+        if not self._in_mod_slider(event.x, event.y):
+            return
+        self._mod_drag = True
+        self._apply_mod(self._mod_from_x(event.x))
+
+    def _on_mod_drag(self, event):
+        if getattr(self, "_mod_drag", False):
+            self._apply_mod(self._mod_from_x(event.x))
+
+    def _on_mod_up(self, event):
+        if getattr(self, "_mod_drag", False):
+            self._mod_drag = False
+            self._apply_mod(self._mod_from_x(event.x))
+
+    def _on_vel_down(self, event):
+        if not self._in_vel_slider(event.x, event.y):
+            return
+        self._vel_drag = True
+        self._apply_vel(self._vel_from_x(event.x))
+
+    def _on_vel_drag(self, event):
+        if getattr(self, "_vel_drag", False):
+            self._apply_vel(self._vel_from_x(event.x))
+
+    def _on_vel_up(self, event):
+        if getattr(self, "_vel_drag", False):
+            self._vel_drag = False
+            self._apply_vel(self._vel_from_x(event.x))
+
+    def _apply_mod(self, t):
+        self._mod_ui(t)
+        self._send_depths()
+
+    def _apply_vel(self, t):
+        self._vel_ui(t)
+        self._send_depths()
+
+    def _send_depths(self):
+        """Émet 'D <mod%>,<vel%>' si le couple a changé (firmware : atténuateurs)."""
+        md = int(round(self._mod_val * 100))
+        vd = int(round(self._vel_val * 100))
+        if (md, vd) == getattr(self, "_depth_sent", (-1, -1)):
+            return
+        self._depth_sent = (md, vd)
+        if self.ser and getattr(self.ser, "is_open", False):
+            try:
+                self.ser.write(("D %d,%d\n" % (md, vd)).encode())
                 self.ser.flush()
             except Exception:
                 pass
@@ -1815,7 +2228,7 @@ class App:
         # Curseur LED BRIGHT : suit la valeur renvoyée par le firmware (CC14 ou
         # commande W) sauf pendant qu'on le fait glisser à la souris.
         if not getattr(self, "_led_drag", False):
-            self._led_ui(max(0.0, min(1.0, d.get("ledbright", 1.0))))
+            self._led_ui(max(0.0, min(1.0, d.get("ledbright", 0.5))))
 
     # ------------------------------------------------------------- overload
     def _update_overload(self, d, sw, gate):
@@ -1951,18 +2364,18 @@ class App:
                 ext = float(parts[48])
             except (ValueError, IndexError):
                 ext = 0.0
-        moddepth = 1.0
+        moddepth = 0.5
         if len(parts) > 49:
             try:
                 moddepth = float(parts[49])
             except (ValueError, IndexError):
-                moddepth = 1.0
-        veldepth = 1.0
+                moddepth = 0.5
+        veldepth = 0.5
         if len(parts) > 50:
             try:
                 veldepth = float(parts[50])
             except (ValueError, IndexError):
-                veldepth = 1.0
+                veldepth = 0.5
         delaylevel = 0.0
         if len(parts) > 51:
             try:
@@ -1975,12 +2388,12 @@ class App:
                 delaytype = int(parts[52])
             except (ValueError, IndexError):
                 delaytype = 0
-        ledbright = 1.0
+        ledbright = 0.5
         if len(parts) > 53:
             try:
                 ledbright = max(0.0, min(1.0, float(parts[53])))
             except (ValueError, IndexError):
-                ledbright = 1.0
+                ledbright = 0.5
         # Table des CC MIDI réellement active dans le firmware (champs 54..58,
         # optionnels) : sert de référence/affichage dans la boîte CONFIG.
         cc_fw = None
@@ -2044,24 +2457,12 @@ class App:
             pass  # l'affichage des wheels/pitch ne doit jamais être bloqué
         self.pitchw.update(12.0 * math.log2(pitch) if pitch > 0 else 0.0)
         self.modw.update(modW / MOD_WHEEL_NORM)
-        # Atténuateur (CC3) : 0 % = molette inerte -> barre et valeur grisées
-        md = max(0.0, min(1.0, d.get("moddepth", 1.0)))
-        self.cv.coords(self.moddep_bar, 142, 874,
-                       142 + 126 * md if md > 0.004 else 142.5, 876)
-        self.cv.itemconfigure(self.moddep_bar,
-                              fill="#7cd4ff" if md > 0.004 else "#39414a")
-        self.cv.itemconfigure(self.moddep_val,
-                              text=f"{md:.0%}",
-                              fill="#d8d8d8" if md > 0.004 else "#5a6470")
-        # Attnuateur vélocité (CC9) : même rendu, teinte ambre (couleur du filtre)
-        vd = max(0.0, min(1.0, d.get("veldepth", 1.0)))
-        self.cv.coords(self.velf_bar, 337, 874,
-                       337 + 126 * vd if vd > 0.004 else 337.5, 876)
-        self.cv.itemconfigure(self.velf_bar,
-                              fill="#ffb14a" if vd > 0.004 else "#39414a")
-        self.cv.itemconfigure(self.velf_val,
-                              text=f"{vd:.0%}",
-                              fill="#d8d8d8" if vd > 0.004 else "#5a6470")
+        # Atténuateurs MOD DEPTH (CC3) / VEL FILT (CC9) : suivent la valeur
+        # renvoyée par le firmware, sauf pendant qu'on les fait glisser.
+        if not getattr(self, "_mod_drag", False):
+            self._mod_ui(max(0.0, min(1.0, d.get("moddepth", 0.5))))
+        if not getattr(self, "_vel_drag", False):
+            self._vel_ui(max(0.0, min(1.0, d.get("veldepth", 0.5))))
 
     def _demo_feed(self):
         t = time.time()
@@ -2110,6 +2511,7 @@ class App:
                 self.ser.write(b"P\n")
             except Exception:
                 pass
+        self._seq_ui_idle()
 
     def _toggle_midi(self):
         """Bascule entre commandes série (M0) et MIDI (M1) sur GPIO3."""
