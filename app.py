@@ -263,10 +263,11 @@ class App(PanelMixin, PatchMixin, ConfigMixin, SequenceMixin, UpdateMixin):
             pass
 
     def _blink_tick(self):
-        """Clignotement local des LED (mode patch ENC1 : VCO1)."""
-        phase_on = (int(time.time() * 4) % 2) == 0
+        """Clignotement local des LED (ENC1 patch : VCO1 ; ENC2 : VCO2
+        reverb/delay — le delay clignote plus vite)."""
+        now = time.time()
         for sw in self.switches.values():
-            sw.blink_tick(phase_on)
+            sw.blink_tick(now)
 
     def _tick(self):
         frames = 0

@@ -214,6 +214,7 @@ class SwitchOn:
         self.blink = False
         self.on = False
         self._phase = True
+        self.blink_period = 0.25   # demi-période du clignotement (s)
         self._draw()
 
     def _draw(self):
@@ -231,6 +232,9 @@ class SwitchOn:
 
     def update(self, raw, locked=False):
         self.blink = (raw >= 2)
+        # modeEnc==3 (VCO2 DELAY) clignote plus vite que ==2 (VCO2 REVERB /
+        # VCO1 PATCH), pour distinguer reverb et delay à l'écran.
+        self.blink_period = 0.10 if raw == 3 else 0.25
         on = bool(raw)
         self.on = on
         self._set(self._phase if self.blink else on)
@@ -248,10 +252,10 @@ class SwitchOn:
     def _lamp(self, on):
         pass
 
-    def blink_tick(self, phase_on):
-        self._phase = phase_on
+    def blink_tick(self, now):
         if self.blink:
-            self._set(phase_on)
+            self._phase = int(now / self.blink_period) % 2 == 0
+            self._set(self._phase)
 
 
 class Wheel:
