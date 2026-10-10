@@ -1731,13 +1731,13 @@ class App:
         self.top["revLed"] = cv.create_oval(
             202, 556 + dy, 212, 566 + dy, fill="#3a4048", outline="#1a2b33")
         self.top["revValue"] = cv.create_text(
-            235, 564 + dy, text="00%", font=("Courier", 16, "bold"),
+            235, 564 + dy, text="00%", font=("Courier", 14, "bold"),
             fill="#ffb14a")
         self.top["revGlow"] = []
         for gx, gy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
             self.top["revGlow"].append(cv.create_text(
                 235 + gx, 564 + dy + gy, text="00%",
-                font=("Courier", 16, "bold"), fill="#5a2a00"))
+                font=("Courier", 14, "bold"), fill="#5a2a00"))
         self.top["revUnit"] = cv.create_text(
             258, 549 + dy, text="REV", font=("Helvetica", 7), fill="#7a828b")
         self.top["rev"] = cv.create_text(
