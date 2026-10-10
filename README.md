@@ -4,6 +4,31 @@ Affiche en temps réel l'état des contrôles physiques du clone Minimoog
 (firmware `minimoog.ino`) sous forme de panneau graphique.
 Les valeurs arrivent par le câble USB (port série) sous forme de trames CSV.
 
+## Structure du projet
+
+Le code est découpé par fonctionnalité :
+
+- `panel_minimoog.py` — point d'entrée : arguments CLI, détection du port,
+  réexporte la classe `App` (compatibilité `import panel_minimoog`).
+- `app.py` — classe `App` : assemble les mixins ci-dessous et pilote la boucle
+  tkinter, la connexion série et l'état global.
+- `theme.py` — thème et constantes partagés : couleurs, mise en page, config
+  MIDI/CC, patchs par défaut, séquences par défaut et utilitaires.
+- `widgets.py` — composants dessinés sur le canvas : `ToolTip`,
+  `PanelComponent`, `Knob`, `SwitchOn`, `Wheel`, `Keyboard`.
+- `panel_build.py` (`PanelMixin`) — fond façon Model D et construction du
+  panneau : sections, cadrans, switchs, molettes, jauges MOD DEPTH / VEL FILT /
+  LED BRIGHT.
+- `patches.py` (`PatchMixin`) — banque de patchs (`patches.json`) : liste,
+  sauvegarde, suppression, push vers le firmware.
+- `midi_config.py` (`ConfigMixin`) — configuration des CC (`config.json`).
+- `sequences.py` (`SequenceMixin`) — démos musicales (`sequences.json`).
+- `telemetry.py` (`UpdateMixin`) — mise à jour de l'affichage depuis les trames
+  `P,...` du firmware.
+
+Les fichiers de données (`patches.json`, `config.json`, `sequences.json`)
+restent à la racine du projet.
+
 ## Fermware
 
 - Utiliser la branche `feature/gui-panneau-minimoog`.
@@ -61,7 +86,7 @@ python3 panel_minimoog.py --demo
 ## Notes
 
 - Le GUI ignore les lignes série qui ne commencent pas par `P,` (logs divers).
-- La fenêtre fait 1500x900 px.b
+- La fenêtre fait 1500x974 px.
 - Le firmware embarque aussi une **banque interne de 12 patchs** (`PATCHES_DEFAUT`
   dans `minimoog.ino`, identiques à `patches.json`) : le synthé est autonome sans le
   PC. Si la GUI est connectée, elle remplace la banque en poussant `patches.json`
